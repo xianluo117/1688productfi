@@ -37,6 +37,7 @@ from .schemas import (
     SortField,
 )
 from .services import (
+    get_or_create_group,
     get_product_with_relations,
     ingest_batch,
     list_group_products,
@@ -186,6 +187,21 @@ def delete_group(
 @app.get("/api/ingest/groups", response_model=list[GroupResponse], dependencies=[Depends(require_ingest_token)])
 def ingest_groups(db: Annotated[Session, Depends(get_db)]) -> list[ProductGroup]:
     return list(db.scalars(select(ProductGroup).order_by(ProductGroup.name.asc())))
+
+
+@app.post(
+    "/api/ingest/groups",
+    response_model=GroupResponse,
+    dependencies=[Depends(require_ingest_token)],
+)
+def ensure_ingest_group(
+    payload: GroupCreate,
+    response: Response,
+    db: Annotated[Session, Depends(get_db)],
+) -> ProductGroup:
+    group, created = get_or_create_group(db, payload.name)
+    response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+    return group
 
 
 async def cache_image_task(product_id: int, image_url: str) -> None:

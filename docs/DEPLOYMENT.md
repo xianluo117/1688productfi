@@ -52,11 +52,19 @@ openssl rand -hex 32
 
 ### 3. 启动
 
+默认从 Docker Hub 拉取以下镜像：
+
+- `qingmiaoai/1688productfitt:backend`
+- `qingmiaoai/1688productfitt:frontend`
+
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-默认只监听 `127.0.0.1:8080`，避免绕过未来的反向代理直接公开服务。
+如需使用其他标签或镜像仓库，在 [`.env`](../.env.example) 中修改 `BACKEND_IMAGE` 和 `FRONTEND_IMAGE`。
+
+默认只监听 `127.0.0.1:1788`，避免与常见服务端口冲突，并防止绕过反向代理直接公开服务。
 
 查看状态和日志：
 
@@ -65,9 +73,9 @@ docker compose ps
 docker compose logs -f backend frontend db
 ```
 
-### 4. 初始化分组
+### 4. 分组管理
 
-访问 `http://服务器地址:8080`，使用 [`.env`](../.env.example) 中的管理员账号密码登录，然后创建油猴需要使用的分组。油猴不能自动创建分组。
+访问 `http://服务器地址:1788`，使用 [`.env`](../.env.example) 中的管理员账号密码登录，可查看和管理分组。油猴脚本也支持输入分组名称；服务器中不存在该名称时会自动创建。
 
 ### 5. 配置油猴
 
@@ -75,15 +83,15 @@ docker compose logs -f backend frontend db
 
 在 1688 搜索页面右上角面板中填写：
 
-- 后台地址：例如 `https://products.example.com`，不要以 `/` 结尾。
+- 后台地址：例如 `https://products.example.com`，不要以 `/` 结尾；直接访问端口时可填写 `http://服务器地址:1788`。
 - API Token：与 `INGEST_API_TOKEN` 完全一致。该 Token 会保存在 Tampermonkey 脚本存储中；请仅在可信浏览器配置文件中使用，避免与不可信用户共享该浏览器配置。
 - 点击“保存配置并加载分组”。
-- 选择后台已创建的分组。
+- 可从下拉框选择已有分组，或在“输入分组”中填写名称。输入名称优先；分组不存在时由后台自动创建。
 - 输入结束页并开始采集。
 
 ## 反向代理
 
-将域名根路径代理到 `127.0.0.1:8080`。必须传递：
+将域名根路径代理到 `127.0.0.1:1788`。必须传递：
 
 - `Host`
 - `X-Real-IP`
@@ -94,7 +102,7 @@ Nginx 示例：
 
 ```nginx
 location / {
-    proxy_pass http://127.0.0.1:8080;
+    proxy_pass http://127.0.0.1:1788;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -130,25 +138,32 @@ docker run --rm -v 1688数据采集_image_data:/data -v "$PWD":/backup alpine ta
 
 ## 升级
 
-备份数据库与图片后更新文件并执行：
+备份数据库与图片后更新 [`docker-compose.yml`](../docker-compose.yml) 和 [`.env`](../.env.example)，然后执行：
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 当前第一版使用 SQLAlchemy 启动时创建表。正式长期迭代时应在修改既有字段前引入 Alembic 版本化迁移，避免直接依赖自动建表改变数据库结构。
 
-## 验证说明
+## 镜像构建与发布状态
 
-当前代码已完成文件级静态检查、JSON 解析、关键接口字段契约检查，以及油猴/Vue 基础分隔符检查。开发机未安装可用的 Docker、Node.js 和本地 Python 运行时，因此 `docker compose build`、Vue 正式构建、Python 编译与 pytest 必须在安装 Docker 的 Linux 部署机上完成：
+- [x] 后端镜像构建完成，构建阶段 Python 编译与 6 项 pytest 测试通过。
+- [x] 前端镜像构建完成，Vite 构建与 Vitest 检查通过。
+- [x] [`docker-compose.yml`](../docker-compose.yml) 已改为直接使用 Docker Hub 镜像，默认对外端口为 `1788`。
+- [x] 油猴脚本支持输入分组名称，并通过采集 Token 接口自动创建或复用分组。
+- [x] `qingmiaoai/1688productfitt:backend` 已推送，摘要为 `sha256:b6aeb2511f873a705523d1c57050d9f4a10f7c8316e970a929c1d40a98c85e27`。
+- [x] `qingmiaoai/1688productfitt:frontend` 已推送，摘要为 `sha256:2fa13515f9d40d51d1ade27fc63fab9ad8dd888f6a262504a7882ebf378c0018`。
+
+部署机验证命令：
 
 ```bash
 docker compose config
-docker compose build
+docker compose pull
 docker compose up -d
-docker compose exec -T backend pytest
 docker compose ps
-curl -fsS http://127.0.0.1:8080/api/health
+curl -fsS http://127.0.0.1:1788/api/health
 ```
 
 上述命令全部成功后，再执行下面的浏览器验收清单。
@@ -156,7 +171,7 @@ curl -fsS http://127.0.0.1:8080/api/health
 ## 浏览器验收清单
 
 1. 后台创建两个名称不同的分组，重复名称应被拒绝。
-2. 油猴能加载已有分组，错误 Token 应显示 401 错误。
+2. 油猴能加载已有分组；输入新分组名称后应自动创建并选中；同名不同大小写或多余空格应复用已有分组；错误 Token 应显示 401 错误。
 3. 采集一页后，后台立即出现商品，而不是等待全部页完成。
 4. 重复上传同一页幂等键，不应产生重复历史快照；过滤后没有商品的页面应成功接受为 0 条空批次。
 5. 同一商品采集到另一个分组后，应只存在一条商品主体，但两个分组均能看到。

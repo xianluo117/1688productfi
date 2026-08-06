@@ -10,7 +10,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY tests ./tests
-RUN mkdir -p /data/images && python -m compileall -q app && pytest -q
+RUN mkdir -p /data/images \
+    && python -m compileall -q app \
+    && ADMIN_PASSWORD=build-test-password \
+       SESSION_SECRET=build-test-session-secret-32-characters \
+       INGEST_API_TOKEN=build-test-ingest-token-32-characters \
+       python -m pytest -q
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from .models import CollectionBatch, Product, ProductGroup, ProductGroupMembership, ProductSnapshot
@@ -23,6 +24,29 @@ SORT_COLUMNS = {
 
 def normalize_group_name(name: str) -> str:
     return " ".join(name.split()).casefold()
+
+
+def get_or_create_group(db: Session, name: str) -> tuple[ProductGroup, bool]:
+    cleaned_name = " ".join(name.split())
+    normalized_name = normalize_group_name(cleaned_name)
+    existing = db.scalar(select(ProductGroup).where(ProductGroup.normalized_name == normalized_name))
+    if existing is not None:
+        return existing, False
+
+    group = ProductGroup(name=cleaned_name, normalized_name=normalized_name)
+    db.add(group)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Another request may have created the same normalized name concurrently.
+        db.rollback()
+        existing = db.scalar(select(ProductGroup).where(ProductGroup.normalized_name == normalized_name))
+        if existing is None:
+            raise
+        return existing, False
+
+    db.refresh(group)
+    return group, True
 
 
 def calculate_metrics(listed_days: int, total_orders: int, total_pieces: int) -> tuple[int, Decimal, Decimal | None]:
