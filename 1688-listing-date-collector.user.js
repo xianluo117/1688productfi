@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688 搜索结果商品数据分页采集
 // @namespace    https://s.1688.com/
-// @version      0.4.0
+// @version      0.4.1
 // @description  分页采集商品链接、图片、上架日期、年销量并计算件单量与每日笔数
 // @author       Zoo
 // @match        https://s.1688.com/*
@@ -61,6 +61,29 @@
       .replace(/\/+$/, "");
   }
 
+  function formatApiError(detail, fallback) {
+    if (typeof detail === "string" && detail.trim()) {
+      return detail;
+    }
+    if (Array.isArray(detail)) {
+      const messages = detail.map((item) => {
+        if (!item || typeof item !== "object") {
+          return String(item);
+        }
+        const location = Array.isArray(item.loc)
+          ? item.loc.filter((part) => part !== "body").join(".")
+          : "";
+        const message = item.msg || item.message || JSON.stringify(item);
+        return location ? `${location}：${message}` : message;
+      });
+      return messages.join("；");
+    }
+    if (detail && typeof detail === "object") {
+      return detail.message || JSON.stringify(detail);
+    }
+    return fallback;
+  }
+
   function apiRequest(method, path, body = null) {
     const config = loadApiConfig();
     const baseUrl = normalizeBaseUrl(config.baseUrl);
@@ -91,7 +114,10 @@
           } else {
             reject(
               new Error(
-                parsed?.detail || `后台请求失败：HTTP ${response.status}`,
+                formatApiError(
+                  parsed?.detail,
+                  `后台请求失败：HTTP ${response.status}${response.responseText ? `，${response.responseText.slice(0, 500)}` : ""}`,
+                ),
               ),
             );
           }
@@ -212,6 +238,21 @@
       .replace(/\s+/g, "")
       .replace(/：/g, ":")
       .trim();
+  }
+
+  function normalizeHttpUrl(value) {
+    const candidate = String(value || "").trim();
+    if (!candidate) {
+      return "";
+    }
+    try {
+      const url = new URL(candidate, location.href);
+      return url.protocol === "http:" || url.protocol === "https:"
+        ? url.href
+        : "";
+    } catch (_error) {
+      return "";
+    }
   }
 
   function getCurrentPage() {
@@ -374,8 +415,9 @@
       records.push({
         sourcePage: page,
         offerId,
-        productUrl,
-        imageUrl,
+        // Use a stable canonical URL instead of the potentially oversized search tracking URL.
+        productUrl: `https://detail.1688.com/offer/${offerId}.html`,
+        imageUrl: normalizeHttpUrl(imageUrl),
         listingDate: listing.listingDate,
         listedDays: listing.listedDays,
         annualSalesRawValue,
