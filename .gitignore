@@ -1,0 +1,14 @@
+.env
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+dist/
+.vite/
+.DS_Store
+Thumbs.db
+*.log
+*.sql
+images.tar.gz
