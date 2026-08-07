@@ -15,6 +15,7 @@ SortField = Literal[
     "last_collected_at",
 ]
 SortDirection = Literal["asc", "desc"]
+UserRole = Literal["admin", "user"]
 
 
 class LoginRequest(BaseModel):
@@ -22,8 +23,43 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class AdminResponse(BaseModel):
+class CurrentUserResponse(BaseModel):
+    id: int
     username: str
+    role: UserRole
+    is_active: bool
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=8, max_length=200)
+    role: UserRole = "user"
+
+
+class UserStatusUpdate(BaseModel):
+    is_active: bool
+
+
+class PasswordReset(BaseModel):
+    password: str = Field(min_length=8, max_length=200)
+
+
+class UserResponse(CurrentUserResponse):
+    model_config = ConfigDict(from_attributes=True)
+
+    ingest_token_prefix: str | None
+    ingest_token_updated_at: datetime | None
+    created_at: datetime
+
+
+class UserCreatedResponse(UserResponse):
+    ingest_token: str
+
+
+class TokenResetResponse(BaseModel):
+    ingest_token: str
+    ingest_token_prefix: str
+    ingest_token_updated_at: datetime
 
 
 class GroupCreate(BaseModel):
@@ -58,6 +94,7 @@ class GroupResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    owner_id: int
     name: str
     default_sort_field: str
     default_sort_direction: str
@@ -120,6 +157,7 @@ class ProductPage(BaseModel):
 
 class SnapshotResponse(BaseModel):
     id: int
+    owner_id: int
     group_id: int | None
     listing_date: date
     listed_days: int

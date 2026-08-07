@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from .models import CollectionBatch, Product, ProductGroup, ProductGroupMembership, ProductSnapshot
+from .models import AdminUser, CollectionBatch, Product, ProductGroup, ProductGroupMembership, ProductSnapshot
 from .schemas import IngestBatchRequest, ProductListItem, SnapshotResponse
 
 
@@ -22,25 +23,50 @@ SORT_COLUMNS = {
 }
 
 
+@dataclass
+class ProductFilters:
+    listing_date_from: date | None = None
+    listing_date_to: date | None = None
+    listed_days_min: int | None = None
+    listed_days_max: int | None = None
+    total_orders_min: int | None = None
+    total_orders_max: int | None = None
+    total_pieces_min: int | None = None
+    total_pieces_max: int | None = None
+    daily_orders_min: Decimal | None = None
+    daily_orders_max: Decimal | None = None
+    collected_at_from: datetime | None = None
+    collected_at_to: datetime | None = None
+
+
 def normalize_group_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
-def get_or_create_group(db: Session, name: str) -> tuple[ProductGroup, bool]:
+def get_or_create_group(db: Session, owner_id: int, name: str) -> tuple[ProductGroup, bool]:
     cleaned_name = " ".join(name.split())
     normalized_name = normalize_group_name(cleaned_name)
-    existing = db.scalar(select(ProductGroup).where(ProductGroup.normalized_name == normalized_name))
+    existing = db.scalar(
+        select(ProductGroup).where(
+            ProductGroup.owner_id == owner_id,
+            ProductGroup.normalized_name == normalized_name,
+        )
+    )
     if existing is not None:
         return existing, False
 
-    group = ProductGroup(name=cleaned_name, normalized_name=normalized_name)
+    group = ProductGroup(owner_id=owner_id, name=cleaned_name, normalized_name=normalized_name)
     db.add(group)
     try:
         db.commit()
     except IntegrityError:
-        # Another request may have created the same normalized name concurrently.
         db.rollback()
-        existing = db.scalar(select(ProductGroup).where(ProductGroup.normalized_name == normalized_name))
+        existing = db.scalar(
+            select(ProductGroup).where(
+                ProductGroup.owner_id == owner_id,
+                ProductGroup.normalized_name == normalized_name,
+            )
+        )
         if existing is None:
             raise
         return existing, False
@@ -80,6 +106,7 @@ def product_to_item(product: Product) -> ProductListItem:
 def snapshot_to_response(snapshot: ProductSnapshot) -> SnapshotResponse:
     return SnapshotResponse(
         id=snapshot.id,
+        owner_id=snapshot.owner_id,
         group_id=snapshot.group_id,
         listing_date=snapshot.listing_date,
         listed_days=snapshot.listed_days,
@@ -92,16 +119,31 @@ def snapshot_to_response(snapshot: ProductSnapshot) -> SnapshotResponse:
     )
 
 
-def ingest_batch(db: Session, payload: IngestBatchRequest) -> tuple[CollectionBatch, bool, list[tuple[int, str]]]:
-    existing = db.scalar(select(CollectionBatch).where(CollectionBatch.idempotency_key == payload.idempotency_key))
+def ingest_batch(
+    db: Session,
+    owner: AdminUser,
+    payload: IngestBatchRequest,
+) -> tuple[CollectionBatch, bool, list[tuple[int, str]]]:
+    existing = db.scalar(
+        select(CollectionBatch).where(
+            CollectionBatch.owner_id == owner.id,
+            CollectionBatch.idempotency_key == payload.idempotency_key,
+        )
+    )
     if existing:
         return existing, True, []
 
-    group = db.get(ProductGroup, payload.group_id)
+    group = db.scalar(
+        select(ProductGroup).where(
+            ProductGroup.id == payload.group_id,
+            ProductGroup.owner_id == owner.id,
+        )
+    )
     if not group:
         raise LookupError("group not found")
 
     batch = CollectionBatch(
+        owner_id=owner.id,
         idempotency_key=payload.idempotency_key,
         group_id=payload.group_id,
         source_page=payload.source_page,
@@ -152,14 +194,16 @@ def ingest_batch(db: Session, payload: IngestBatchRequest) -> tuple[CollectionBa
 
         membership = db.scalar(
             select(ProductGroupMembership).where(
+                ProductGroupMembership.owner_id == owner.id,
                 ProductGroupMembership.product_id == product.id,
                 ProductGroupMembership.group_id == group.id,
             )
         )
         if membership is None:
-            db.add(ProductGroupMembership(product_id=product.id, group_id=group.id))
+            db.add(ProductGroupMembership(owner_id=owner.id, product_id=product.id, group_id=group.id))
 
         db.add(ProductSnapshot(
+            owner_id=owner.id,
             batch_id=batch.id,
             product_id=product.id,
             group_id=group.id,
@@ -190,21 +234,46 @@ def get_product_with_relations(db: Session, product_id: int) -> Product | None:
     )
 
 
+def apply_product_filters(statement, filters: ProductFilters):
+    bounds = (
+        (Product.listing_date, filters.listing_date_from, filters.listing_date_to),
+        (Product.listed_days, filters.listed_days_min, filters.listed_days_max),
+        (Product.total_orders, filters.total_orders_min, filters.total_orders_max),
+        (Product.total_pieces, filters.total_pieces_min, filters.total_pieces_max),
+        (Product.daily_orders, filters.daily_orders_min, filters.daily_orders_max),
+        (Product.last_collected_at, filters.collected_at_from, filters.collected_at_to),
+    )
+    for column, minimum, maximum in bounds:
+        if minimum is not None:
+            statement = statement.where(column >= minimum)
+        if maximum is not None:
+            statement = statement.where(column <= maximum)
+    return statement
+
+
 def list_group_products(
     db: Session,
     group_id: int,
+    owner_id: int,
     page: int,
     page_size: int,
     sort_field: str,
     sort_direction: str,
+    filters: ProductFilters,
 ) -> tuple[list[Product], int]:
     column = SORT_COLUMNS[sort_field]
-    membership_filter = Product.memberships.any(ProductGroupMembership.group_id == group_id)
-    total = db.scalar(select(func.count(Product.id)).where(membership_filter)) or 0
+    membership_filter = Product.memberships.any(
+        and_(
+            ProductGroupMembership.group_id == group_id,
+            ProductGroupMembership.owner_id == owner_id,
+        )
+    )
+    filtered = apply_product_filters(select(Product).where(membership_filter), filters)
+    count_statement = apply_product_filters(select(func.count(Product.id)).where(membership_filter), filters)
+    total = db.scalar(count_statement) or 0
     order = column.asc() if sort_direction == "asc" else column.desc()
     products = list(db.scalars(
-        select(Product)
-        .where(membership_filter)
+        filtered
         .order_by(order, Product.id.asc())
         .offset((page - 1) * page_size)
         .limit(page_size)

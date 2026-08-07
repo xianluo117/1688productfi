@@ -9,12 +9,13 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
 COPY tests ./tests
 RUN mkdir -p /data/images \
     && python -m compileall -q app \
     && ADMIN_PASSWORD=build-test-password \
        SESSION_SECRET=build-test-session-secret-32-characters \
-       INGEST_API_TOKEN=build-test-ingest-token-32-characters \
        python -m pytest -q
 
 EXPOSE 8000

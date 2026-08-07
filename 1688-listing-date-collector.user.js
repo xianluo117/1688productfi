@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         1688 搜索结果商品数据分页采集
 // @namespace    https://s.1688.com/
-// @version      0.4.1
+// @version      0.5.0
 // @description  分页采集商品链接、图片、上架日期、年销量并计算件单量与每日笔数
 // @author       Zoo
 // @match        https://s.1688.com/*
@@ -44,6 +44,8 @@
   function loadApiConfig() {
     return {
       baseUrl: "",
+      // Fill this with the personal ingest token created or reset by an administrator.
+      // Legacy global INGEST_API_TOKEN values are rejected by backend version 2.0+.
       apiToken: "",
       selectedGroupId: "",
       groupNameInput: "",
@@ -88,7 +90,7 @@
     const config = loadApiConfig();
     const baseUrl = normalizeBaseUrl(config.baseUrl);
     if (!baseUrl || !config.apiToken) {
-      return Promise.reject(new Error("请先配置后台地址和 API Token"));
+      return Promise.reject(new Error("请先配置后台地址和个人采集令牌"));
     }
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -614,8 +616,8 @@
                 <input id="zoo-api-url" type="url" placeholder="https://products.example.com">
             </label>
             <label class="zoo-field">
-                <span>API Token</span>
-                <input id="zoo-api-token" type="password" placeholder="后台 INGEST_API_TOKEN">
+                <span>个人采集令牌</span>
+                <input id="zoo-api-token" type="password" placeholder="由管理员创建或重置的个人令牌">
             </label>
             <label class="zoo-field">
                 <span>已有分组</span>
@@ -771,7 +773,7 @@
         groupNameInput,
       });
       if (!baseUrl || !apiToken) {
-        throw new Error("请配置后台地址和 API Token");
+        throw new Error("请配置后台地址和个人采集令牌");
       }
       const group = await resolveCollectionGroup(groupNameInput, groupSelect);
       const groupId = group.id;

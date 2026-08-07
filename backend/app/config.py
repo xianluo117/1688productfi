@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     admin_password: str
     session_secret: str
-    ingest_api_token: str
     allowed_origins: str = "https://s.1688.com"
     cookie_secure: bool = False
     image_storage_path: Path = Path("/data/images")
@@ -20,7 +19,7 @@ class Settings(BaseSettings):
     max_ingest_items: int = 200
     max_image_bytes: int = 8 * 1024 * 1024
 
-    @field_validator("admin_password", "session_secret", "ingest_api_token")
+    @field_validator("admin_password", "session_secret")
     @classmethod
     def validate_secret(cls, value: str) -> str:
         if len(value) < 12:
