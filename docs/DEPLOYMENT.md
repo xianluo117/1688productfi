@@ -127,6 +127,16 @@ location / {
 }
 ```
 
+## 本次发布
+
+- Git 提交：`f15cfc9 feat: add multi-user data isolation and filters`
+- 后端镜像：`qingmiaoai/1688productfitt:backend`
+- 后端摘要：`sha256:f67d8a2c44a066e282a91bc0899910ec00e7ccddea699cdf603d2e7f26587cae`
+- 前端镜像：`qingmiaoai/1688productfitt:frontend`
+- 前端摘要：`sha256:c2a28777e9c10090898c593414df5befae8f1a509bab4b00192d5e46ebbdaee3`
+- 后端镜像构建阶段通过 9 项测试。
+- 前端镜像构建阶段通过 Vite 构建与 Vitest 检查。
+
 ## 恢复
 
 恢复到空数据库：
