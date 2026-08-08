@@ -15,6 +15,16 @@ SortField = Literal[
     "last_collected_at",
 ]
 SortDirection = Literal["asc", "desc"]
+TemuSortField = Literal[
+    "temu_product_id",
+    "sale_price",
+    "original_price",
+    "daily_sales",
+    "weekly_sales",
+    "total_sales",
+    "listing_date",
+    "last_collected_at",
+]
 UserRole = Literal["admin", "user"]
 
 
@@ -174,3 +184,139 @@ class ProductDetail(ProductListItem):
     image_status: str
     groups: list[GroupResponse]
     snapshots: list[SnapshotResponse]
+
+
+class TemuGroupUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    default_sort_field: TemuSortField | None = None
+    default_sort_direction: SortDirection | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_optional_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            raise ValueError("group name cannot be empty")
+        return cleaned
+
+
+class TemuGroupResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    owner_id: int
+    name: str
+    default_sort_field: str
+    default_sort_direction: str
+    created_at: datetime
+
+
+class TemuIngestProduct(BaseModel):
+    temu_product_id: str = Field(min_length=1, max_length=40, pattern=r"^\d+$")
+    yunqi_gdid: str | None = Field(default=None, max_length=40, pattern=r"^\d+$")
+    mall_id: str | None = Field(default=None, max_length=40)
+    title: str = Field(min_length=1, max_length=2000)
+    product_url: HttpUrl
+    image_url: HttpUrl | None = None
+    sale_price: Decimal | None = Field(default=None, ge=0)
+    original_price: Decimal | None = Field(default=None, ge=0)
+    daily_sales: int = Field(default=0, ge=0)
+    weekly_sales: int = Field(default=0, ge=0)
+    monthly_sales: int = Field(default=0, ge=0)
+    total_sales: int = Field(default=0, ge=0)
+    daily_revenue: Decimal | None = Field(default=None, ge=0)
+    weekly_revenue: Decimal | None = Field(default=None, ge=0)
+    monthly_revenue: Decimal | None = Field(default=None, ge=0)
+    total_revenue: Decimal | None = Field(default=None, ge=0)
+    listing_date: date | None = None
+    category: str | None = Field(default=None, max_length=255)
+    rating: Decimal | None = Field(default=None, ge=0, le=5)
+    review_count: int | None = Field(default=None, ge=0)
+    shop_name: str | None = Field(default=None, max_length=255)
+    shop_type: str | None = Field(default=None, max_length=80)
+    shop_opened_at: date | None = None
+    shop_total_sales: int | None = Field(default=None, ge=0)
+    temu_tags: str | None = None
+    is_ad: bool = False
+    delivery_tip: str | None = None
+    association_status: Literal["商品ID匹配", "容器关联"]
+
+
+class TemuIngestBatchRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=160)
+    group_id: int = Field(gt=0)
+    source_page: int = Field(gt=0)
+    products: list[TemuIngestProduct]
+
+
+class TemuProductListItem(BaseModel):
+    id: int
+    temu_product_id: str
+    yunqi_gdid: str | None
+    mall_id: str | None
+    title: str
+    product_url: str
+    image_url: str | None
+    sale_price: Decimal | None
+    original_price: Decimal | None
+    daily_sales: int
+    weekly_sales: int
+    monthly_sales: int
+    total_sales: int
+    daily_revenue: Decimal | None
+    weekly_revenue: Decimal | None
+    monthly_revenue: Decimal | None
+    total_revenue: Decimal | None
+    listing_date: date | None
+    listed_days: int | None
+    category: str | None
+    rating: Decimal | None
+    review_count: int | None
+    shop_name: str | None
+    shop_type: str | None
+    derived_shop_type: str | None
+    shop_opened_at: date | None
+    shop_total_sales: int | None
+    temu_tags: str | None
+    is_ad: bool
+    delivery_tip: str | None
+    last_collected_at: datetime
+
+
+class TemuProductPage(BaseModel):
+    items: list[TemuProductListItem]
+    total: int
+    page: int
+    page_size: int
+    sort_field: str
+    sort_direction: str
+
+
+class TemuSnapshotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    owner_id: int
+    group_id: int | None
+    sale_price: Decimal | None
+    original_price: Decimal | None
+    daily_sales: int
+    weekly_sales: int
+    monthly_sales: int
+    total_sales: int
+    daily_revenue: Decimal | None
+    weekly_revenue: Decimal | None
+    monthly_revenue: Decimal | None
+    total_revenue: Decimal | None
+    listing_date: date | None
+    shop_type: str | None
+    temu_tags: str | None
+    is_ad: bool
+    collected_at: datetime
+
+
+class TemuProductDetail(TemuProductListItem):
+    groups: list[TemuGroupResponse]
+    snapshots: list[TemuSnapshotResponse]

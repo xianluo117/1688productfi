@@ -318,6 +318,133 @@ dd {
   .app-shell {
     grid-template-columns: 1fr;
   }
+
+  .platform-home {
+    min-height: 100vh;
+    padding: 64px max(24px, 8vw);
+    background:
+      radial-gradient(circle at top left, #fff2e7, transparent 40%), #f4f6fa;
+  }
+  .platform-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 1100px;
+    margin: 0 auto 36px;
+  }
+  .platform-header h1 {
+    margin: 4px 0;
+    font-size: 38px;
+  }
+  .platform-header p {
+    color: #667085;
+  }
+  .eyebrow {
+    color: #ff6400 !important;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+  }
+  .platform-grid {
+    max-width: 1100px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 24px;
+  }
+  .platform-card {
+    min-height: 280px;
+    padding: 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: 10px;
+    color: white;
+    text-align: left;
+    border-radius: 24px;
+    box-shadow: 0 20px 50px #0002;
+  }
+  .platform-card:hover {
+    transform: translateY(-3px);
+  }
+  .platform-1688 {
+    background: linear-gradient(135deg, #ff7300, #e94b00);
+  }
+  .platform-temu {
+    background: linear-gradient(135deg, #171717, #3d3d3d);
+  }
+  .platform-logo {
+    font-size: 44px;
+    font-weight: 900;
+  }
+  .platform-card strong {
+    font-size: 24px;
+  }
+  .platform-card small {
+    font-size: 14px;
+    opacity: 0.84;
+  }
+  .back-home {
+    margin-bottom: 16px;
+    background: #303b49;
+    color: white;
+    text-align: left;
+  }
+  .temu-filters .single {
+    grid-template-columns: 80px 1fr;
+  }
+  .switch-field {
+    grid-template-columns: auto 1fr !important;
+    justify-content: start;
+  }
+  .switch-field input {
+    width: 18px;
+    height: 18px;
+  }
+  .title-cell {
+    max-width: 320px;
+    white-space: normal;
+    line-height: 1.4;
+  }
+  .shop-type-badge,
+  .ad-badge {
+    display: inline-block;
+    padding: 3px 7px;
+    margin-right: 5px;
+    border-radius: 999px;
+    background: #eef4ff;
+    color: #175cd3;
+    font-size: 12px;
+  }
+  .ad-badge {
+    background: #fff0ed;
+    color: #b42318;
+  }
+  .temu-detail {
+    width: min(1000px, 94vw);
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 10px;
+    margin: 18px 0;
+  }
+  .detail-grid span {
+    color: #667085;
+  }
+  .secondary {
+    background: #eef1f5 !important;
+    color: #344054 !important;
+  }
+  @media (max-width: 800px) {
+    .platform-grid {
+      grid-template-columns: 1fr;
+    }
+    .platform-header {
+      align-items: flex-start;
+      gap: 18px;
+    }
+  }
   aside {
     position: static;
   }

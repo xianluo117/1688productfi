@@ -114,3 +114,112 @@ class ProductSnapshot(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     product: Mapped[Product] = relationship(back_populates="snapshots")
+
+
+class TemuProduct(Base):
+    __tablename__ = "temu_products"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    temu_product_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    yunqi_gdid: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    mall_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(Text)
+    product_url: Mapped[str] = mapped_column(Text)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sale_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    original_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    daily_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    weekly_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    monthly_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    daily_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    weekly_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    monthly_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    total_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rating: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    review_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    shop_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    shop_type: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    shop_opened_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shop_total_sales: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    temu_tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_ad: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    delivery_tip: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    memberships: Mapped[list[TemuGroupMembership]] = relationship(back_populates="product", cascade="all, delete-orphan")
+    snapshots: Mapped[list[TemuProductSnapshot]] = relationship(back_populates="product", cascade="all, delete-orphan")
+
+
+class TemuProductGroup(Base):
+    __tablename__ = "temu_product_groups"
+    __table_args__ = (UniqueConstraint("owner_id", "normalized_name", name="uq_temu_group_owner_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    normalized_name: Mapped[str] = mapped_column(String(120), index=True)
+    default_sort_field: Mapped[str] = mapped_column(String(40), default="daily_sales")
+    default_sort_direction: Mapped[str] = mapped_column(String(4), default="desc")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    memberships: Mapped[list[TemuGroupMembership]] = relationship(back_populates="group", cascade="all, delete-orphan")
+
+
+class TemuGroupMembership(Base):
+    __tablename__ = "temu_group_memberships"
+    __table_args__ = (UniqueConstraint("owner_id", "product_id", "group_id", name="uq_temu_owner_product_group"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("temu_products.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("temu_product_groups.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    product: Mapped[TemuProduct] = relationship(back_populates="memberships")
+    group: Mapped[TemuProductGroup] = relationship(back_populates="memberships")
+
+
+class TemuCollectionBatch(Base):
+    __tablename__ = "temu_collection_batches"
+    __table_args__ = (UniqueConstraint("owner_id", "idempotency_key", name="uq_temu_batch_owner_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160), index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("temu_product_groups.id", ondelete="SET NULL"), nullable=True, index=True)
+    source_page: Mapped[int] = mapped_column(Integer)
+    item_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TemuProductSnapshot(Base):
+    __tablename__ = "temu_product_snapshots"
+    __table_args__ = (UniqueConstraint("batch_id", "product_id", name="uq_temu_snapshot_batch_product"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("admin_users.id", ondelete="CASCADE"), index=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("temu_collection_batches.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("temu_products.id", ondelete="CASCADE"), index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("temu_product_groups.id", ondelete="SET NULL"), nullable=True, index=True)
+    sale_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    original_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    daily_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    weekly_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    monthly_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_sales: Mapped[int] = mapped_column(BigInteger, default=0)
+    daily_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    weekly_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    monthly_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    total_revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    listing_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    shop_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    temu_tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_ad: Mapped[bool] = mapped_column(Boolean, default=False)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    product: Mapped[TemuProduct] = relationship(back_populates="snapshots")

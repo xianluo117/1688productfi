@@ -1,6 +1,8 @@
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { api, appendQuery } from "./api";
+import PlatformHome from "./components/PlatformHome.vue";
+import TemuManager from "./components/TemuManager.vue";
 
 const currentUser = ref(null);
 const loginForm = reactive({ username: "admin", password: "" });
@@ -21,6 +23,7 @@ const activeView = ref("products");
 const createdToken = ref("");
 const userForm = reactive({ username: "", password: "", role: "user" });
 const filters = reactive(defaultFilters());
+const selectedPlatform = ref(null);
 
 function defaultFilters() {
   return {
@@ -81,6 +84,7 @@ async function login() {
 async function logout() {
   await api("/api/auth/logout", { method: "POST" }).catch(() => null);
   currentUser.value = null;
+  selectedPlatform.value = null;
 }
 
 async function loadUsers() {
@@ -289,7 +293,7 @@ onMounted(checkSession);
 <template>
   <main v-if="!currentUser" class="login-page">
     <form class="login-card" @submit.prevent="login">
-      <h1>1688 商品管理</h1>
+      <h1>产品数据管理</h1>
       <input
         v-model="loginForm.username"
         autocomplete="username"
@@ -306,9 +310,27 @@ onMounted(checkSession);
     </form>
   </main>
 
+  <PlatformHome
+    v-else-if="!selectedPlatform"
+    :user="currentUser"
+    @select="selectedPlatform = $event"
+    @logout="logout"
+  />
+
+  <TemuManager
+    v-else-if="selectedPlatform === 'temu'"
+    :user="currentUser"
+    :users="users"
+    @home="selectedPlatform = null"
+    @logout="logout"
+  />
+
   <div v-else class="app-shell">
     <aside>
-      <h1>商品管理</h1>
+      <button class="back-home" @click="selectedPlatform = null">
+        ← 平台首页
+      </button>
+      <h1>1688 商品</h1>
       <p class="identity">
         {{ currentUser.username }} · {{ isAdmin ? "管理员" : "用户" }}
       </p>

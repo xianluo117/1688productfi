@@ -1,8 +1,25 @@
 # 1688 商品管理系统
 
+## 平台入口
+
+登录成功后首先进入平台选择首页，可进入 1688 或 Temu 产品系统。
+
+Temu 数据规则：
+
+- Temu 原生商品 ID 是全局唯一键，任一用户上传同 ID 都更新全局当前值。
+- 云启 `gdid` 仅是辅助字段，允许与 Temu 原生商品 ID 不同；云启 Shadow DOM 位于对应原生商品卡片内时视为可靠容器关联。
+- Temu 分组、成员关系、批次和历史快照按用户隔离。
+- 管理员可按用户切换 Temu 数据视角。
+- Temu 列表默认隐藏广告，筛选面板可开启显示。
+- 半托管且包含 `Local` 标签显示为“半托Y1”，其他半托管显示为“半托Y2”。
+- Temu 油猴脚本同时支持 CSV 导出和个人令牌上传，每次 See more 后等待 5 秒再上传可靠关联记录。
+
+升级会自动执行 Alembic 迁移 `20260808_01` 并创建 Temu 独立数据表，升级前必须备份 PostgreSQL。
+
 ## 组成
 
-- [`1688-listing-date-collector.user.js`](../1688-listing-date-collector.user.js)：Tampermonkey 采集端。
+- [`1688-listing-date-collector.user.js`](../1688-listing-date-collector.user.js)：1688 Tampermonkey 采集端。
+- [`temu-product-collector.user.js`](../temu-product-collector.user.js)：Temu 与云启数据 Tampermonkey 采集端。
 - [`backend`](../backend)：FastAPI、PostgreSQL、Alembic、用户认证、采集授权和图片缓存。
 - [`frontend`](../frontend)：Vue 3 管理后台。
 - [`docker-compose.yml`](../docker-compose.yml)：Docker Compose 部署入口。
@@ -105,7 +122,12 @@ curl -fsS http://127.0.0.1:1788/api/health
 
 ## 配置油猴
 
-使用最新版 [`1688-listing-date-collector.user.js`](../1688-listing-date-collector.user.js) 完整覆盖旧脚本。
+分别安装或完整覆盖最新版：
+
+- [`1688-listing-date-collector.user.js`](../1688-listing-date-collector.user.js)
+- [`temu-product-collector.user.js`](../temu-product-collector.user.js)
+
+Temu 脚本需要 Tampermonkey 授权 `GM_xmlhttpRequest` 和目标后台域名连接权限。安装或升级脚本时应确认授权提示；请求由 Tampermonkey 发出，不依赖 Temu 页面 CORS。
 
 在采集面板填写：
 
@@ -113,7 +135,7 @@ curl -fsS http://127.0.0.1:1788/api/health
 - 个人采集令牌：管理员创建用户或重置令牌时提供的 `zoo_...` 值。
 - 已有分组或输入分组名称。分组不存在时在当前令牌用户下自动创建。
 
-不要继续使用旧 `.env` 中的 `INGEST_API_TOKEN`。
+不要继续使用旧 [`.env`](../.env) 中的 `INGEST_API_TOKEN`。
 
 ## 反向代理
 
@@ -157,3 +179,6 @@ docker compose exec -T db psql -U product_manager product_manager < product_mana
 8. 任意用户上传同一商品后，全局商品当前指标更新。
 9. 上架日期/天数、总笔数、总件数、每日笔数和采集时间筛选可组合使用。
 10. 升级前已有数据全部出现在管理员用户视角中。
+11. Temu 脚本可从 `www.temu.com` 通过 Tampermonkey 跨域请求加载分组并上传批次。
+12. 云启 `gdid` 与 Temu 原生商品 ID 不同时，同一原生商品卡片内的云启 Shadow DOM 仍可按可靠容器关联上传，并以原生 ID 更新商品。
+13. Temu 列表默认不显示广告；开启“显示广告产品”后才显示广告记录。
