@@ -1,6 +1,8 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from io import BytesIO
 
+from PIL import Image
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -13,6 +15,8 @@ from app.similarity_services import (
     merge_products,
     normalize_vector,
     phash_distance,
+    prepare_embedding_image,
+    queue_control,
 )
 
 
@@ -45,6 +49,25 @@ def test_embedding_endpoint_accepts_openai_base_or_full_url():
     assert embedding_endpoint_url("https://newapi.example.com/v1") == "https://newapi.example.com/v1/embeddings"
     assert embedding_endpoint_url("https://newapi.example.com/v1/") == "https://newapi.example.com/v1/embeddings"
     assert embedding_endpoint_url("https://newapi.example.com/v1/embeddings") == "https://newapi.example.com/v1/embeddings"
+
+
+def test_prepare_embedding_image_converts_transparent_png_to_jpeg():
+    source = BytesIO()
+    Image.new("RGBA", (2, 2), (255, 0, 0, 100)).save(source, format="PNG")
+    result = prepare_embedding_image(source.getvalue())
+    assert result.startswith(b"\xff\xd8")
+    with Image.open(BytesIO(result)) as image:
+        assert image.format == "JPEG"
+        assert image.mode == "RGB"
+
+
+def test_queue_control_defaults_to_running_with_four_workers():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        control = queue_control(db)
+        assert control.state == "running"
+        assert control.concurrency == 4
 
 
 def test_request_template_replaces_image_placeholders():

@@ -233,12 +233,45 @@ class SimilarityClusterResponse(BaseModel):
     members: list[SimilarityProductResponse]
 
 
+class SimilarityQueueUpdate(BaseModel):
+    concurrency: int = Field(ge=1, le=32)
+
+
+class SimilarityTaskResponse(BaseModel):
+    id: int
+    product_id: int
+    offer_id: str
+    config_id: int
+    config_name: str
+    status: str
+    attempts: int
+    last_error: str | None
+    available_at: datetime
+    locked_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class SimilarityConnectionTestResponse(BaseModel):
+    success: bool
+    product_id: int
+    offer_id: str
+    endpoint: str
+    returned_dimension: int
+    elapsed_ms: int
+    message: str
+
+
 class SimilarityTaskStatsResponse(BaseModel):
     pending: int = 0
     processing: int = 0
     completed: int = 0
     failed: int = 0
+    cancelled: int = 0
     review_pending: int = 0
+    completed_last_minute: int = 0
+    queue_state: Literal["running", "paused", "stopped"] = "running"
+    concurrency: int = 4
 
 
 class ProductPage(BaseModel):

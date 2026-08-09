@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from time import perf_counter
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select, update
@@ -25,20 +26,27 @@ from .schemas import (
     ImageEmbeddingConfigUpsert,
     SimilarityCandidateResponse,
     SimilarityClusterResponse,
+    SimilarityConnectionTestResponse,
     SimilarityDecisionRequest,
     SimilarityProductResponse,
+    SimilarityQueueUpdate,
     SimilaritySourceResponse,
+    SimilarityTaskResponse,
     SimilarityTaskStatsResponse,
 )
 from .services import product_to_item
 from .similarity_services import (
     decrypt_api_key,
+    embedding_endpoint_url,
     encrypt_api_key,
     enqueue_all_products,
+    image_fingerprints,
     mask_api_key,
     merge_products,
     product_sources,
+    queue_control,
     recalculate_cluster_representative,
+    request_embedding,
     task_stats,
 )
 
@@ -175,12 +183,151 @@ def rebuild_config(
     return SimilarityTaskStatsResponse(**task_stats(db))
 
 
+def task_response(task: SimilarityTask, product: Product, config: ImageEmbeddingConfig) -> SimilarityTaskResponse:
+    return SimilarityTaskResponse(
+        id=task.id,
+        product_id=product.id,
+        offer_id=product.offer_id,
+        config_id=config.id,
+        config_name=config.name,
+        status=task.status,
+        attempts=task.attempts,
+        last_error=task.last_error,
+        available_at=task.available_at,
+        locked_at=task.locked_at,
+        finished_at=task.finished_at,
+        created_at=task.created_at,
+    )
+
+
 @router.get("/admin/stats", response_model=SimilarityTaskStatsResponse)
 def stats(
     _: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> SimilarityTaskStatsResponse:
     return SimilarityTaskStatsResponse(**task_stats(db))
+
+
+@router.put("/admin/queue", response_model=SimilarityTaskStatsResponse)
+def update_queue(
+    payload: SimilarityQueueUpdate,
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityTaskStatsResponse:
+    control = queue_control(db)
+    control.concurrency = payload.concurrency
+    db.commit()
+    return SimilarityTaskStatsResponse(**task_stats(db))
+
+
+@router.post("/admin/queue/{action}", response_model=SimilarityTaskStatsResponse)
+def control_queue(
+    action: Literal["pause", "resume", "stop"],
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityTaskStatsResponse:
+    control = queue_control(db)
+    if action == "pause":
+        control.state = "paused"
+    elif action == "resume":
+        control.state = "running"
+    else:
+        control.state = "stopped"
+        db.execute(
+            update(SimilarityTask)
+            .where(SimilarityTask.status == "pending")
+            .values(status="cancelled", last_error="管理员停止并清空等待队列", finished_at=datetime.now(timezone.utc))
+        )
+    db.commit()
+    return SimilarityTaskStatsResponse(**task_stats(db))
+
+
+@router.get("/admin/tasks", response_model=list[SimilarityTaskResponse])
+def list_tasks(
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    task_status: str = Query(default="failed", alias="status"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[SimilarityTaskResponse]:
+    rows = db.execute(
+        select(SimilarityTask, Product, ImageEmbeddingConfig)
+        .join(Product, Product.id == SimilarityTask.product_id)
+        .join(ImageEmbeddingConfig, ImageEmbeddingConfig.id == SimilarityTask.config_id)
+        .where(SimilarityTask.status == task_status)
+        .order_by(SimilarityTask.id.desc())
+        .limit(limit)
+    ).all()
+    return [task_response(task, product, config) for task, product, config in rows]
+
+
+@router.post("/admin/tasks/id/{task_id}/retry", response_model=SimilarityTaskStatsResponse)
+def retry_task(
+    task_id: int,
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityTaskStatsResponse:
+    task = db.get(SimilarityTask, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task.status = "pending"
+    task.attempts = 0
+    task.last_error = None
+    task.available_at = datetime.now(timezone.utc)
+    task.locked_at = None
+    task.finished_at = None
+    queue_control(db).state = "running"
+    db.commit()
+    return SimilarityTaskStatsResponse(**task_stats(db))
+
+
+@router.post("/admin/tasks/retry-failed", response_model=SimilarityTaskStatsResponse)
+def retry_failed_tasks(
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityTaskStatsResponse:
+    db.execute(
+        update(SimilarityTask)
+        .where(SimilarityTask.status == "failed")
+        .values(status="pending", attempts=0, last_error=None, available_at=datetime.now(timezone.utc), locked_at=None, finished_at=None)
+    )
+    queue_control(db).state = "running"
+    db.commit()
+    return SimilarityTaskStatsResponse(**task_stats(db))
+
+
+@router.post("/admin/configs/{config_id}/test", response_model=SimilarityConnectionTestResponse)
+async def test_config(
+    config_id: int,
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityConnectionTestResponse:
+    config = db.get(ImageEmbeddingConfig, config_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    product = db.scalar(
+        select(Product)
+        .where(Product.cached_image_name.is_not(None), Product.image_status == "ready")
+        .order_by(Product.last_collected_at.desc())
+    )
+    if not product or not product.cached_image_name:
+        raise HTTPException(status_code=400, detail="没有可用于测试的已缓存商品图片")
+    path = settings.image_storage_path / product.cached_image_name
+    try:
+        _, _, content = image_fingerprints(path)
+        started = perf_counter()
+        vector = await request_embedding(config, product, content, settings)
+        elapsed_ms = int((perf_counter() - started) * 1000)
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return SimilarityConnectionTestResponse(
+        success=True,
+        product_id=product.id,
+        offer_id=product.offer_id,
+        endpoint=embedding_endpoint_url(config.base_url),
+        returned_dimension=config.output_dimension,
+        elapsed_ms=elapsed_ms,
+        message=f"接口正常，返回 {config.output_dimension} 维向量（存储长度 {len(vector)}）",
+    )
 
 
 @router.get("/admin/candidates", response_model=list[SimilarityCandidateResponse])

@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ from .models import (
     ProductSimilarityCluster,
     ProductSimilarityClusterMember,
     SimilarityAuditLog,
+    SimilarityQueueControl,
     SimilarityTask,
 )
 
@@ -120,12 +122,28 @@ def enqueue_all_products(db: Session, config: ImageEmbeddingConfig, force: bool 
     return count
 
 
+def prepare_embedding_image(content: bytes) -> bytes:
+    with Image.open(BytesIO(content)) as image:
+        image.seek(0)
+        if image.mode in {"RGBA", "LA"} or "transparency" in image.info:
+            rgba = image.convert("RGBA")
+            background = Image.new("RGBA", rgba.size, "white")
+            background.alpha_composite(rgba)
+            prepared = background.convert("RGB")
+        else:
+            prepared = image.convert("RGB")
+        output = BytesIO()
+        prepared.save(output, format="JPEG", quality=92, optimize=True)
+        return output.getvalue()
+
+
 def image_fingerprints(path: Path) -> tuple[str, str, bytes]:
-    content = path.read_bytes()
-    content_hash = hashlib.sha256(content).hexdigest()
-    with Image.open(path) as image:
+    original = path.read_bytes()
+    content_hash = hashlib.sha256(original).hexdigest()
+    with Image.open(BytesIO(original)) as image:
+        image.seek(0)
         phash = str(imagehash.phash(image.convert("RGB")))
-    return content_hash, phash, content
+    return content_hash, phash, prepare_embedding_image(original)
 
 
 def phash_distance(left: str, right: str) -> int:
@@ -149,12 +167,11 @@ def _replace_template(value: Any, replacements: dict[str, Any]) -> Any:
 
 
 def build_embedding_request(config: ImageEmbeddingConfig, product: Product, content: bytes) -> dict[str, Any]:
-    mime = "image/png" if product.cached_image_name and product.cached_image_name.lower().endswith(".png") else "image/jpeg"
     image_base64 = base64.b64encode(content).decode("ascii")
     replacements = {
         "{{model}}": config.model_name,
         "{{image_base64}}": image_base64,
-        "{{image_data_url}}": f"data:{mime};base64,{image_base64}",
+        "{{image_data_url}}": f"data:image/jpeg;base64,{image_base64}",
         "{{image_url}}": product.original_image_url or "",
         "{{product_id}}": product.offer_id,
     }
@@ -195,6 +212,17 @@ def embedding_endpoint_url(base_url: str) -> str:
     return f"{cleaned}/embeddings"
 
 
+class EmbeddingRequestError(RuntimeError):
+    pass
+
+
+def _response_error(response: httpx.Response) -> EmbeddingRequestError:
+    body = response.text.strip().replace("\x00", "")[:2000]
+    return EmbeddingRequestError(
+        f"embedding API HTTP {response.status_code} {response.reason_phrase}: {body or '<empty response>'}"
+    )
+
+
 async def request_embedding(
     config: ImageEmbeddingConfig,
     product: Product,
@@ -205,15 +233,30 @@ async def request_embedding(
     api_key = decrypt_api_key(config.api_key_encrypted, settings)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
-        response = await client.post(
-            embedding_endpoint_url(config.base_url),
-            headers=headers,
-            json=build_embedding_request(config, product, content),
-        )
-        response.raise_for_status()
-    raw = extract_response_path(response.json(), config.response_path)
-    return normalize_vector(raw, config.output_dimension)
+    try:
+        async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
+            response = await client.post(
+                embedding_endpoint_url(config.base_url),
+                headers=headers,
+                json=build_embedding_request(config, product, content),
+            )
+    except httpx.TimeoutException as error:
+        raise EmbeddingRequestError(f"embedding API timeout after {config.timeout_seconds}s") from error
+    except httpx.HTTPError as error:
+        raise EmbeddingRequestError(f"embedding API connection failed: {error}") from error
+    if not response.is_success:
+        raise _response_error(response)
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise EmbeddingRequestError(f"embedding API returned invalid JSON: {response.text[:1000]}") from error
+    try:
+        raw = extract_response_path(payload, config.response_path)
+        return normalize_vector(raw, config.output_dimension)
+    except (KeyError, IndexError, TypeError, ValueError) as error:
+        raise EmbeddingRequestError(
+            f"embedding response validation failed at '{config.response_path}': {error}; response={json.dumps(payload, ensure_ascii=False)[:2000]}"
+        ) from error
 
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -415,6 +458,16 @@ def generate_candidates(
     return count
 
 
+def queue_control(db: Session, create: bool = True) -> SimilarityQueueControl | None:
+    control = db.get(SimilarityQueueControl, 1)
+    if control is None and create:
+        control = SimilarityQueueControl(id=1, state="running", concurrency=4)
+        db.add(control)
+        db.commit()
+        db.refresh(control)
+    return control
+
+
 def claim_task(db: Session) -> SimilarityTask | None:
     now = datetime.now(timezone.utc)
     stale = now - timedelta(minutes=10)
@@ -438,15 +491,30 @@ def claim_task(db: Session) -> SimilarityTask | None:
     return task
 
 
-def task_stats(db: Session) -> dict[str, int]:
+def task_stats(db: Session) -> dict[str, Any]:
     rows = db.execute(
         select(SimilarityTask.status, func.count(SimilarityTask.id)).group_by(SimilarityTask.status)
     ).all()
-    result = {"pending": 0, "processing": 0, "completed": 0, "failed": 0}
+    result: dict[str, Any] = {
+        "pending": 0,
+        "processing": 0,
+        "completed": 0,
+        "failed": 0,
+        "cancelled": 0,
+    }
     result.update({status: int(count) for status, count in rows})
     result["review_pending"] = int(db.scalar(
         select(func.count(ProductSimilarityCandidate.id)).where(ProductSimilarityCandidate.status == "pending")
     ) or 0)
+    result["completed_last_minute"] = int(db.scalar(
+        select(func.count(SimilarityTask.id)).where(
+            SimilarityTask.status == "completed",
+            SimilarityTask.finished_at >= datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+    ) or 0)
+    control = queue_control(db)
+    result["queue_state"] = control.state
+    result["concurrency"] = control.concurrency
     return result
 
 

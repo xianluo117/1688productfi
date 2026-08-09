@@ -630,6 +630,34 @@ dd {
   gap: 24px;
 }
 
+.queue-panel {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 18px 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.queue-panel > div {
+  display: grid;
+  gap: 4px;
+  margin-right: auto;
+}
+
+.queue-panel > div span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.queue-panel label {
+  display: grid;
+  gap: 5px;
+  width: 110px;
+}
+
 .similarity-stats {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -746,6 +774,61 @@ dd {
   gap: 10px;
 }
 
+.test-success,
+.test-error {
+  padding: 12px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+}
+
+.test-success {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.test-error {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.failure-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.failure-card {
+  display: grid;
+  grid-template-columns: minmax(160px, 240px) minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  background: #fffafa;
+}
+
+.failure-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.failure-card span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.failure-card pre {
+  max-height: 150px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border-radius: 8px;
+  color: #7f1d1d;
+  background: #fef2f2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .candidate-card {
   padding: 18px;
   display: grid;
@@ -831,7 +914,8 @@ dd {
   }
 
   .settings-panel,
-  .candidate-card {
+  .candidate-card,
+  .failure-card {
     grid-template-columns: 1fr;
   }
 
@@ -929,7 +1013,8 @@ dd {
   }
   .detail-grid,
   .similarity-stats,
-  .ai-config-form {
+  .ai-config-form,
+  .failure-card {
     grid-template-columns: 1fr;
   }
 

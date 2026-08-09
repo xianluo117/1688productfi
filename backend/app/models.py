@@ -268,6 +268,17 @@ class ProductImageEmbedding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class SimilarityQueueControl(Base):
+    __tablename__ = "similarity_queue_control"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    state: Mapped[str] = mapped_column(String(20), default="running")
+    concurrency: Mapped[int] = mapped_column(Integer, default=4)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SimilarityTask(Base):
     __tablename__ = "similarity_tasks"
     __table_args__ = (
