@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -283,13 +283,17 @@ def cluster_detail(
     )
 
 
-@router.delete("/admin/clusters/{cluster_id}/members/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/admin/clusters/{cluster_id}/members/{product_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
 def remove_cluster_member(
     cluster_id: int,
     product_id: int,
     admin: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-) -> None:
+) -> Response:
     member = db.scalar(select(ProductSimilarityClusterMember).where(
         ProductSimilarityClusterMember.cluster_id == cluster_id,
         ProductSimilarityClusterMember.product_id == product_id,
@@ -306,3 +310,4 @@ def remove_cluster_member(
         payload={"product_id": product_id},
     ))
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -9,6 +9,7 @@ from app.models import Product, ProductSimilarityClusterMember
 from app.similarity_services import (
     VECTOR_STORAGE_DIMENSION,
     build_embedding_request,
+    embedding_endpoint_url,
     merge_products,
     normalize_vector,
     phash_distance,
@@ -38,6 +39,12 @@ def test_normalize_vector_pads_fixed_storage_dimension():
 
 def test_phash_distance_accepts_hex_hashes():
     assert phash_distance("0000000000000000", "0000000000000001") == 1
+
+
+def test_embedding_endpoint_accepts_openai_base_or_full_url():
+    assert embedding_endpoint_url("https://newapi.example.com/v1") == "https://newapi.example.com/v1/embeddings"
+    assert embedding_endpoint_url("https://newapi.example.com/v1/") == "https://newapi.example.com/v1/embeddings"
+    assert embedding_endpoint_url("https://newapi.example.com/v1/embeddings") == "https://newapi.example.com/v1/embeddings"
 
 
 def test_request_template_replaces_image_placeholders():

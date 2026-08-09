@@ -188,6 +188,13 @@ def normalize_vector(raw: Any, expected_dimension: int) -> list[float]:
     return normalized + [0.0] * (VECTOR_STORAGE_DIMENSION - len(normalized))
 
 
+def embedding_endpoint_url(base_url: str) -> str:
+    cleaned = base_url.rstrip("/")
+    if cleaned.endswith("/embeddings"):
+        return cleaned
+    return f"{cleaned}/embeddings"
+
+
 async def request_embedding(
     config: ImageEmbeddingConfig,
     product: Product,
@@ -200,7 +207,7 @@ async def request_embedding(
         headers["Authorization"] = f"Bearer {api_key}"
     async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
         response = await client.post(
-            config.base_url,
+            embedding_endpoint_url(config.base_url),
             headers=headers,
             json=build_embedding_request(config, product, content),
         )

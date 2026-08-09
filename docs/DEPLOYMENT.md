@@ -7,18 +7,20 @@
 部署要求：
 
 - 数据库使用 `pgvector/pgvector:pg16`，迁移会启用 `vector` 扩展。
+- `migrate` 服务先完成数据库迁移，随后后端与独立 `similarity-worker` 才会启动。
 - 后端与独立 `similarity-worker` 共用数据库和图片卷。
-- 在 `.env` 设置稳定的 `AI_SECRET_KEY`，用于加密管理员面板保存的 AI API Key。变更该密钥后旧 API Key 无法解密。
+- `.env` 不需要填写 `AI_SECRET_KEY`。管理员面板保存的第三方 API Key 默认由 `SESSION_SECRET` 加密，因此必须保持 `SESSION_SECRET` 稳定。
 - 向量存储固定为 1536 维。实际图片模型可输出不超过 1536 维的向量，后端归一化后补零，允许后续切换模型维度而不重建列类型。
 
 管理员在 1688 页面进入“AI 同款”后完成配置：
 
-1. 填写图片向量接口、API Key、模型名和实际输出维度。
-2. 填写请求 JSON 模板与响应路径。
-3. 设置 TopK、pHash 自动距离、审核阈值、自动合并阈值和自动合并开关。
-4. 保存为当前模型后，存量缓存图片会渐进排队处理。
+1. 填写 OpenAI 兼容服务的自定义 Base URL，例如 `https://newapi.momoaisite.com/v1`。也可直接填写完整的 `/embeddings` 地址。
+2. 在管理员面板填写并保存第三方 API Key、模型名和实际输出维度，无需写入 `.env`。
+3. 默认请求体为 `model + input`，默认响应路径为 `data.0.embedding`；第三方接口不一致时再修改请求 JSON 模板与响应路径。
+4. 设置 TopK、pHash 自动距离、审核阈值、自动合并阈值和自动合并开关。
+5. 保存为当前模型后，存量缓存图片会渐进排队处理。
 
-请求模板支持双大括号占位符：`model`、`image_data_url`、`image_base64`、`image_url`、`product_id`。
+填写 Base URL 时，后端自动追加 `/embeddings`。请求模板支持双大括号占位符：`model`、`image_data_url`、`image_base64`、`image_url`、`product_id`。
 
 模型、维度、接口或模板变化时会创建新版本。旧向量继续保留，新版本后台渐进重算，避免直接破坏在线索引。
 
@@ -123,7 +125,7 @@ docker compose pull
 docker compose up -d
 ```
 
-后端启动时自动执行 Alembic 升级。首次升级多用户版本时：
+Docker Compose 先运行一次性 `migrate` 服务执行 Alembic 升级，成功后才启动后端和图片相似度 worker。首次升级多用户版本时：
 
 1. 现有管理员账号标记为管理员角色。
 2. 现有分组、成员关系、批次和快照归属该管理员。

@@ -13,12 +13,16 @@ const stats = reactive({
   review_pending: 0,
 });
 const saving = ref(false);
+const openAiCompatibleTemplate = {
+  model: "{{model}}",
+  input: "{{image_data_url}}",
+};
 const requestTemplateText = ref(
-  JSON.stringify({ model: "{{model}}", input: "{{image_data_url}}" }, null, 2),
+  JSON.stringify(openAiCompatibleTemplate, null, 2),
 );
 const form = reactive({
   id: null,
-  name: "图片向量模型",
+  name: "OpenAI 兼容图片向量模型",
   base_url: "",
   api_key: "",
   model_name: "",
@@ -51,10 +55,15 @@ function selectConfig(config) {
   requestTemplateText.value = JSON.stringify(config.request_template, null, 2);
 }
 
+function useOpenAiPreset() {
+  requestTemplateText.value = JSON.stringify(openAiCompatibleTemplate, null, 2);
+  form.response_path = "data.0.embedding";
+}
+
 function createNew() {
   Object.assign(form, {
     id: null,
-    name: "图片向量模型",
+    name: "OpenAI 兼容图片向量模型",
     base_url: "",
     api_key: "",
     model_name: "",
@@ -68,11 +77,7 @@ function createNew() {
     auto_merge_enabled: false,
     activate: true,
   });
-  requestTemplateText.value = JSON.stringify(
-    { model: "{{model}}", input: "{{image_data_url}}" },
-    null,
-    2,
-  );
+  useOpenAiPreset();
 }
 
 async function saveConfig() {
@@ -130,7 +135,7 @@ onMounted(load);
     <header>
       <div>
         <h2>AI 同款识别</h2>
-        <span>配置图片向量接口、处理队列与人工审核</span>
+        <span>管理员保存 OpenAI 兼容图片向量接口、API Key 与审核规则</span>
       </div>
       <button class="secondary" @click="emit('back')">返回商品</button>
     </header>
@@ -182,19 +187,29 @@ onMounted(load);
       </div>
 
       <form class="ai-config-form" @submit.prevent="saveConfig">
+        <p class="wide form-help">
+          服务类型固定为 OpenAI 兼容格式。模型 URL、API Key
+          和模型名称均在此处保存，无需在 .env 中填写 AI_SECRET_KEY。
+        </p>
         <label>配置名称<input v-model="form.name" required /></label>
         <label
-          >接口地址<input
+          >自定义 Base URL<input
             v-model="form.base_url"
             type="url"
-            placeholder="https://example.com/v1/embeddings"
+            placeholder="https://newapi.momoaisite.com/v1"
             required
         /></label>
+        <p class="wide form-help">
+          可填写 Base URL（例如 https://newapi.momoaisite.com/v1）或完整的
+          /embeddings 地址；填写 Base URL 时后端自动追加 /embeddings。
+        </p>
         <label
-          >API Key<input
+          >第三方 API Key<input
             v-model="form.api_key"
             type="password"
-            :placeholder="form.id ? '留空则保持原密钥' : '可留空'"
+            :placeholder="
+              form.id ? '留空则保持已保存密钥' : '在此填写第三方 API Key'
+            "
         /></label>
         <label>模型名称<input v-model="form.model_name" required /></label>
         <label
@@ -250,6 +265,11 @@ onMounted(load);
             spellcheck="false"
           />
         </label>
+        <div class="wide config-actions">
+          <button type="button" class="secondary" @click="useOpenAiPreset">
+            恢复 OpenAI 兼容模板
+          </button>
+        </div>
         <label class="switch-field"
           ><input
             v-model="form.auto_merge_enabled"
@@ -276,7 +296,9 @@ onMounted(load);
           </button>
         </div>
         <p class="wide form-help">
-          模板占位符：model、image_data_url、image_base64、image_url、product_id，使用双大括号包裹。
+          默认请求为 model + input，响应向量读取
+          data.0.embedding。第三方接口格式不同时，可修改 JSON
+          模板和响应路径。模板占位符：model、image_data_url、image_base64、image_url、product_id，使用双大括号包裹。
         </p>
       </form>
     </section>
