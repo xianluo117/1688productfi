@@ -30,7 +30,10 @@ def upgrade() -> None:
         from app.database import Base
         from app import models  # noqa: F401
 
-        Base.metadata.create_all(bind=op.get_bind())
+        bind = op.get_bind()
+        if bind.dialect.name == "postgresql":
+            op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        Base.metadata.create_all(bind=bind)
         return
 
     with op.batch_alter_table("admin_users") as batch_op:

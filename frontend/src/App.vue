@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { api, appendQuery } from "./api";
 import PlatformHome from "./components/PlatformHome.vue";
+import SimilarityAdmin from "./components/SimilarityAdmin.vue";
 import TemuManager from "./components/TemuManager.vue";
 
 const currentUser = ref(null);
@@ -236,6 +237,11 @@ function sortMark(field) {
 }
 
 async function showDetail(product) {
+  if (product.cluster_id) {
+    detail.value = await api(`/api/similarity/clusters/${product.cluster_id}`);
+    detail.value.isCluster = true;
+    return;
+  }
   const ownerParam = isAdmin.value ? `?owner_id=${selectedOwnerId.value}` : "";
   detail.value = await api(`/api/products/${product.id}${ownerParam}`);
 }
@@ -346,6 +352,12 @@ onMounted(checkSession);
           @click="activeView = 'users'"
         >
           用户
+        </button>
+        <button
+          :class="{ active: activeView === 'similarity' }"
+          @click="activeView = 'similarity'"
+        >
+          AI 同款
         </button>
       </div>
       <template v-if="activeView === 'products'">
@@ -464,6 +476,7 @@ onMounted(checkSession);
           <thead>
             <tr>
               <th>图片</th>
+              <th>同款</th>
               <th @click="toggleSort('offer_id')">
                 商品 ID{{ sortMark("offer_id") }}
               </th>
@@ -500,6 +513,16 @@ onMounted(checkSession);
                 <div v-else class="image-placeholder">暂无图片</div>
               </td>
               <td>
+                <button
+                  v-if="product.cluster_id"
+                  class="cluster-badge"
+                  @click="showDetail(product)"
+                >
+                  {{ product.cluster_member_count }} 件同款
+                </button>
+                <span v-else class="single-badge">单品</span>
+              </td>
+              <td>
                 <a
                   :href="product.product_url"
                   target="_blank"
@@ -520,7 +543,7 @@ onMounted(checkSession);
               <td><button @click="showDetail(product)">详情</button></td>
             </tr>
             <tr v-if="!loading && !products.length">
-              <td colspan="9" class="empty">没有符合条件的商品</td>
+              <td colspan="10" class="empty">没有符合条件的商品</td>
             </tr>
           </tbody>
         </table>
@@ -532,6 +555,11 @@ onMounted(checkSession);
         ><button :disabled="page >= totalPages" @click="page++">下一页</button>
       </div>
     </section>
+
+    <SimilarityAdmin
+      v-else-if="activeView === 'similarity'"
+      @back="activeView = 'products'"
+    />
 
     <section v-else class="content user-management">
       <header>
@@ -594,7 +622,39 @@ onMounted(checkSession);
     </section>
 
     <div v-if="detail" class="drawer-backdrop" @click.self="detail = null">
-      <section class="drawer">
+      <section v-if="detail.isCluster" class="drawer cluster-drawer">
+        <button class="close" @click="detail = null">×</button>
+        <h2>同款商品 · {{ detail.members.length }} 件</h2>
+        <p>代表商品按总件数、每日笔数、最近采集时间依次选择。</p>
+        <article
+          v-for="member in detail.members"
+          :key="member.id"
+          class="cluster-member"
+          :class="{ representative: member.id === detail.representative.id }"
+        >
+          <img v-if="member.image_url" :src="member.image_url" />
+          <div>
+            <strong>{{ member.offer_id }}</strong>
+            <span
+              >总件数 {{ formatNumber(member.total_pieces, 0) }} · 每日笔数
+              {{ formatNumber(member.daily_orders) }}</span
+            >
+            <small>{{
+              member.sources
+                .map((item) => `${item.username}/${item.group_name}`)
+                .join("、")
+            }}</small>
+            <a
+              :href="member.product_url"
+              target="_blank"
+              rel="noopener noreferrer"
+              >打开 1688 商品</a
+            >
+          </div>
+          <b v-if="member.id === detail.representative.id">代表商品</b>
+        </article>
+      </section>
+      <section v-else class="drawer">
         <button class="close" @click="detail = null">×</button
         ><img
           v-if="detail.image_url"

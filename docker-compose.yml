@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-product_manager}
@@ -21,11 +21,12 @@ services:
   backend:
     image: ${BACKEND_IMAGE:-qingmiaoai/1688productfitt:backend}
     restart: unless-stopped
-    environment:
+    environment: &backend-environment
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-product_manager}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-product_manager}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in .env}
+      AI_SECRET_KEY: ${AI_SECRET_KEY:-}
       # Legacy global ingest tokens are intentionally unsupported after the multi-user upgrade.
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://s.1688.com}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
@@ -47,12 +48,25 @@ services:
       timeout: 5s
       retries: 10
 
+  similarity-worker:
+    image: ${BACKEND_IMAGE:-qingmiaoai/1688productfitt:backend}
+    restart: unless-stopped
+    command: ['python', '-m', 'app.similarity_worker']
+    environment: *backend-environment
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - image_data:/data/images
+
   frontend:
     image: ${FRONTEND_IMAGE:-qingmiaoai/1688productfitt:frontend}
     restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
+      similarity-worker:
+        condition: service_started
     ports:
       - '${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-1788}:80'
 

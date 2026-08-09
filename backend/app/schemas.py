@@ -135,6 +135,49 @@ class IngestBatchRequest(BaseModel):
         return self
 
 
+class ImageEmbeddingConfigUpsert(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    base_url: HttpUrl
+    api_key: str | None = Field(default=None, max_length=4000)
+    model_name: str = Field(min_length=1, max_length=255)
+    output_dimension: int = Field(gt=0, le=1536)
+    request_template: dict
+    response_path: str = Field(default="data.0.embedding", min_length=1, max_length=255)
+    timeout_seconds: int = Field(default=60, ge=5, le=600)
+    top_k: int = Field(default=100, ge=1, le=500)
+    phash_auto_distance: int = Field(default=4, ge=0, le=64)
+    review_threshold: float = Field(default=0.86, ge=-1, le=1)
+    auto_merge_threshold: float = Field(default=0.94, ge=-1, le=1)
+    auto_merge_enabled: bool = False
+    activate: bool = True
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> "ImageEmbeddingConfigUpsert":
+        if self.auto_merge_threshold < self.review_threshold:
+            raise ValueError("auto merge threshold must be at least review threshold")
+        return self
+
+
+class ImageEmbeddingConfigResponse(BaseModel):
+    id: int
+    name: str
+    base_url: str
+    api_key_masked: str | None
+    model_name: str
+    output_dimension: int
+    request_template: dict
+    response_path: str
+    timeout_seconds: int
+    top_k: int
+    phash_auto_distance: int
+    review_threshold: float
+    auto_merge_threshold: float
+    auto_merge_enabled: bool
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
 class IngestBatchResponse(BaseModel):
     batch_id: int
     accepted: int
@@ -154,6 +197,48 @@ class ProductListItem(BaseModel):
     daily_orders: Decimal
     average_pieces_per_order: Decimal | None
     last_collected_at: datetime
+    cluster_id: int | None = None
+    cluster_member_count: int = 1
+
+
+class SimilaritySourceResponse(BaseModel):
+    user_id: int
+    username: str
+    group_id: int
+    group_name: str
+
+
+class SimilarityProductResponse(ProductListItem):
+    similarity_status: str
+    sources: list[SimilaritySourceResponse] = Field(default_factory=list)
+
+
+class SimilarityCandidateResponse(BaseModel):
+    id: int
+    left: SimilarityProductResponse
+    right: SimilarityProductResponse
+    phash_distance: int | None
+    image_similarity: float | None
+    status: str
+    created_at: datetime
+
+
+class SimilarityDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+
+
+class SimilarityClusterResponse(BaseModel):
+    id: int
+    representative: SimilarityProductResponse
+    members: list[SimilarityProductResponse]
+
+
+class SimilarityTaskStatsResponse(BaseModel):
+    pending: int = 0
+    processing: int = 0
+    completed: int = 0
+    failed: int = 0
+    review_pending: int = 0
 
 
 class ProductPage(BaseModel):

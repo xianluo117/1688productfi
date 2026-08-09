@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -51,6 +52,9 @@ class Product(Base):
     original_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     cached_image_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     image_status: Mapped[str] = mapped_column(String(20), default="pending")
+    image_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    image_phash: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    similarity_status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
     listing_date: Mapped[date] = mapped_column(Date)
     listed_days: Mapped[int] = mapped_column(Integer)
     total_orders: Mapped[int] = mapped_column(BigInteger)
@@ -223,3 +227,113 @@ class TemuProductSnapshot(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     product: Mapped[TemuProduct] = relationship(back_populates="snapshots")
+
+
+class ImageEmbeddingConfig(Base):
+    __tablename__ = "image_embedding_configs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    base_url: Mapped[str] = mapped_column(Text)
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_name: Mapped[str] = mapped_column(String(255))
+    output_dimension: Mapped[int] = mapped_column(Integer)
+    request_template: Mapped[dict] = mapped_column(JSON)
+    response_path: Mapped[str] = mapped_column(String(255), default="data.0.embedding")
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    top_k: Mapped[int] = mapped_column(Integer, default=100)
+    phash_auto_distance: Mapped[int] = mapped_column(Integer, default=4)
+    review_threshold: Mapped[float] = mapped_column(Float, default=0.86)
+    auto_merge_threshold: Mapped[float] = mapped_column(Float, default=0.94)
+    auto_merge_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ProductImageEmbedding(Base):
+    __tablename__ = "product_image_embeddings"
+    __table_args__ = (
+        UniqueConstraint("product_id", "config_id", "image_content_hash", name="uq_product_image_embedding_version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    config_id: Mapped[int] = mapped_column(ForeignKey("image_embedding_configs.id", ondelete="CASCADE"), index=True)
+    image_content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    phash: Mapped[str] = mapped_column(String(16), index=True)
+    vector: Mapped[list[float]] = mapped_column(Vector(1536))
+    source_dimension: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class SimilarityTask(Base):
+    __tablename__ = "similarity_tasks"
+    __table_args__ = (
+        UniqueConstraint("product_id", "config_id", "image_content_hash", name="uq_similarity_task_version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    config_id: Mapped[int] = mapped_column(ForeignKey("image_embedding_configs.id", ondelete="CASCADE"), index=True)
+    image_content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProductSimilarityCluster(Base):
+    __tablename__ = "product_similarity_clusters"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    representative_product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="RESTRICT"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ProductSimilarityClusterMember(Base):
+    __tablename__ = "product_similarity_cluster_members"
+    __table_args__ = (UniqueConstraint("product_id", name="uq_similarity_cluster_product"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cluster_id: Mapped[int] = mapped_column(ForeignKey("product_similarity_clusters.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    decision_source: Mapped[str] = mapped_column(String(20), default="automatic")
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    added_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProductSimilarityCandidate(Base):
+    __tablename__ = "product_similarity_candidates"
+    __table_args__ = (UniqueConstraint("left_product_id", "right_product_id", "config_id", name="uq_similarity_candidate_pair"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    left_product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    right_product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    config_id: Mapped[int] = mapped_column(ForeignKey("image_embedding_configs.id", ondelete="CASCADE"), index=True)
+    phash_distance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    decision_source: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class SimilarityAuditLog(Base):
+    __tablename__ = "similarity_audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action: Mapped[str] = mapped_column(String(40), index=True)
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("product_similarity_candidates.id", ondelete="SET NULL"), nullable=True)
+    cluster_id: Mapped[int | None] = mapped_column(ForeignKey("product_similarity_clusters.id", ondelete="SET NULL"), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)

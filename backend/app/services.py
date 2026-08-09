@@ -8,7 +8,16 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from .models import AdminUser, CollectionBatch, Product, ProductGroup, ProductGroupMembership, ProductSnapshot
+from .models import (
+    AdminUser,
+    CollectionBatch,
+    Product,
+    ProductGroup,
+    ProductGroupMembership,
+    ProductSimilarityCluster,
+    ProductSimilarityClusterMember,
+    ProductSnapshot,
+)
 from .schemas import IngestBatchRequest, ProductListItem, SnapshotResponse
 
 
@@ -86,7 +95,13 @@ def calculate_metrics(listed_days: int, total_orders: int, total_pieces: int) ->
     return calculation_days, daily_orders, average
 
 
-def product_to_item(product: Product) -> ProductListItem:
+def product_to_item(
+    product: Product,
+    cluster_id: int | None = None,
+    cluster_member_count: int = 1,
+) -> ProductListItem:
+    cluster_id = cluster_id if cluster_id is not None else getattr(product, "cluster_id", None)
+    cluster_member_count = getattr(product, "cluster_member_count", cluster_member_count)
     return ProductListItem(
         id=product.id,
         offer_id=product.offer_id,
@@ -100,6 +115,8 @@ def product_to_item(product: Product) -> ProductListItem:
         daily_orders=product.daily_orders,
         average_pieces_per_order=product.average_pieces_per_order,
         last_collected_at=product.last_collected_at,
+        cluster_id=cluster_id,
+        cluster_member_count=cluster_member_count,
     )
 
 
@@ -191,6 +208,9 @@ def ingest_batch(
             product.last_collected_at = now
             if image_changed or (image_url and not product.cached_image_name):
                 product.image_status = "pending"
+                product.image_content_hash = None
+                product.image_phash = None
+                product.similarity_status = "pending"
 
         membership = db.scalar(
             select(ProductGroupMembership).where(
@@ -261,21 +281,47 @@ def list_group_products(
     sort_direction: str,
     filters: ProductFilters,
 ) -> tuple[list[Product], int]:
-    column = SORT_COLUMNS[sort_field]
-    membership_filter = Product.memberships.any(
-        and_(
-            ProductGroupMembership.group_id == group_id,
-            ProductGroupMembership.owner_id == owner_id,
-        )
+    membership_product_ids = select(ProductGroupMembership.product_id).where(
+        ProductGroupMembership.group_id == group_id,
+        ProductGroupMembership.owner_id == owner_id,
     )
-    filtered = apply_product_filters(select(Product).where(membership_filter), filters)
-    count_statement = apply_product_filters(select(func.count(Product.id)).where(membership_filter), filters)
-    total = db.scalar(count_statement) or 0
-    order = column.asc() if sort_direction == "asc" else column.desc()
-    products = list(db.scalars(
-        filtered
-        .order_by(order, Product.id.asc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
+    visible_products = list(db.scalars(
+        apply_product_filters(select(Product).where(Product.id.in_(membership_product_ids)), filters)
     ))
+
+    rows_by_key: dict[tuple[str, int], tuple[Product, int | None, int]] = {}
+    for product in visible_products:
+        member = db.scalar(
+            select(ProductSimilarityClusterMember).where(
+                ProductSimilarityClusterMember.product_id == product.id
+            )
+        )
+        if member is None:
+            rows_by_key[("product", product.id)] = (product, None, 1)
+            continue
+        cluster = db.get(ProductSimilarityCluster, member.cluster_id)
+        if cluster is None:
+            rows_by_key[("product", product.id)] = (product, None, 1)
+            continue
+        representative = db.get(Product, cluster.representative_product_id) or product
+        member_count = db.scalar(
+            select(func.count(ProductSimilarityClusterMember.id)).where(
+                ProductSimilarityClusterMember.cluster_id == cluster.id
+            )
+        ) or 1
+        rows_by_key[("cluster", cluster.id)] = (representative, cluster.id, int(member_count))
+
+    rows = list(rows_by_key.values())
+    reverse = sort_direction == "desc"
+    rows.sort(
+        key=lambda row: (getattr(row[0], sort_field), row[0].id),
+        reverse=reverse,
+    )
+    total = len(rows)
+    start = (page - 1) * page_size
+    products: list[Product] = []
+    for product, cluster_id, member_count in rows[start:start + page_size]:
+        product.cluster_id = cluster_id
+        product.cluster_member_count = member_count
+        products.append(product)
     return products, total

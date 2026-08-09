@@ -1,5 +1,37 @@
 # 1688 商品管理系统
 
+## 1688 图片同款识别
+
+系统使用 pHash 与图片 Embedding 建立跨用户共享的 1688 同款簇。商品列表按簇去重，并按总件数、每日笔数、最近采集时间选择全局代表商品。
+
+部署要求：
+
+- 数据库使用 `pgvector/pgvector:pg16`，迁移会启用 `vector` 扩展。
+- 后端与独立 `similarity-worker` 共用数据库和图片卷。
+- 在 `.env` 设置稳定的 `AI_SECRET_KEY`，用于加密管理员面板保存的 AI API Key。变更该密钥后旧 API Key 无法解密。
+- 向量存储固定为 1536 维。实际图片模型可输出不超过 1536 维的向量，后端归一化后补零，允许后续切换模型维度而不重建列类型。
+
+管理员在 1688 页面进入“AI 同款”后完成配置：
+
+1. 填写图片向量接口、API Key、模型名和实际输出维度。
+2. 填写请求 JSON 模板与响应路径。
+3. 设置 TopK、pHash 自动距离、审核阈值、自动合并阈值和自动合并开关。
+4. 保存为当前模型后，存量缓存图片会渐进排队处理。
+
+请求模板支持双大括号占位符：`model`、`image_data_url`、`image_base64`、`image_url`、`product_id`。
+
+模型、维度、接口或模板变化时会创建新版本。旧向量继续保留，新版本后台渐进重算，避免直接破坏在线索引。
+
+升级命令：
+
+```text
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+从普通 PostgreSQL 16 镜像切换至 pgvector PostgreSQL 16 时保留原 `postgres_data` 卷，禁止删除数据卷。
+
 ## 平台入口
 
 登录成功后首先进入平台选择首页，可进入 1688 或 Temu 产品系统。

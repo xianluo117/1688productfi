@@ -59,6 +59,8 @@ from .services import (
     product_to_item,
     snapshot_to_response,
 )
+from .similarity_router import router as similarity_router
+from .similarity_services import enqueue_product
 from .temu_router import router as temu_router
 
 
@@ -97,6 +99,7 @@ app.add_middleware(
 )
 app.mount("/images", StaticFiles(directory=settings.image_storage_path, check_dir=False), name="images")
 app.include_router(temu_router)
+app.include_router(similarity_router)
 
 
 def current_user_response(user: AdminUser) -> CurrentUserResponse:
@@ -357,8 +360,14 @@ async def cache_image_task(product_id: int, image_url: str) -> None:
             if not product:
                 return
             filename = await cache_product_image(product.offer_id, image_url, settings)
+            image_changed = filename != product.cached_image_name
             product.cached_image_name = filename
             product.image_status = "ready"
+            if image_changed:
+                product.image_content_hash = None
+                product.image_phash = None
+                product.similarity_status = "pending"
+            enqueue_product(db, product)
             db.commit()
     except Exception:
         logger.exception("Failed to cache image for product %s", product_id)
