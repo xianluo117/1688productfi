@@ -41,6 +41,13 @@ def test_normalize_vector_pads_fixed_storage_dimension():
     assert result[-1] == 0
 
 
+def test_normalize_vector_truncates_larger_matryoshka_response():
+    result = normalize_vector([3, 4, 12], 2)
+    assert len(result) == VECTOR_STORAGE_DIMENSION
+    assert result[:2] == [0.6, 0.8]
+    assert result[2:] == [0.0] * (VECTOR_STORAGE_DIMENSION - 2)
+
+
 def test_phash_distance_accepts_hex_hashes():
     assert phash_distance("0000000000000000", "0000000000000001") == 1
 

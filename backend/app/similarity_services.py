@@ -194,10 +194,16 @@ def normalize_vector(raw: Any, expected_dimension: int) -> list[float]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("embedding response is not a non-empty list")
     vector = [float(value) for value in raw]
-    if len(vector) != expected_dimension:
-        raise ValueError(f"embedding dimension {len(vector)} does not match configured {expected_dimension}")
-    if len(vector) > VECTOR_STORAGE_DIMENSION:
-        raise ValueError(f"embedding dimension exceeds storage limit {VECTOR_STORAGE_DIMENSION}")
+    if len(vector) < expected_dimension:
+        raise ValueError(f"embedding dimension {len(vector)} is smaller than configured {expected_dimension}")
+    if expected_dimension > VECTOR_STORAGE_DIMENSION:
+        raise ValueError(f"configured embedding dimension exceeds storage limit {VECTOR_STORAGE_DIMENSION}")
+
+    # Gemini embedding models use Matryoshka Representation Learning. Some
+    # OpenAI-compatible gateways ignore `dimensions` and return the default
+    # 3072 values, so retaining the requested prefix is equivalent to asking
+    # the upstream model for that smaller output dimension.
+    vector = vector[:expected_dimension]
     norm = math.sqrt(sum(value * value for value in vector))
     if not norm:
         raise ValueError("embedding vector norm is zero")
