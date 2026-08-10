@@ -61,6 +61,11 @@ const selectedReadyCount = computed(() =>
     0,
   ),
 );
+const scopeDescription = computed(() =>
+  selectedGroupIds.value.length
+    ? `所选用户的 ${selectedGroupIds.value.length} 个分组`
+    : "全部用户的全部 1688 商品",
+);
 
 async function loadScopes() {
   selectedGroupIds.value = [];
@@ -204,7 +209,17 @@ async function testConfig(config) {
   try {
     testResult.value = await api(
       `/api/similarity/admin/configs/${config.id}/test`,
-      { method: "POST" },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          base_url: form.base_url,
+          api_key: form.api_key.trim() || null,
+          model_name: form.model_name,
+          output_dimension: form.output_dimension,
+          response_path: form.response_path,
+          timeout_seconds: form.timeout_seconds,
+        }),
+      },
     );
   } catch (error) {
     testResult.value = { success: false, message: error.message };
@@ -213,21 +228,37 @@ async function testConfig(config) {
   }
 }
 
-async function rebuild(config) {
-  if (!selectedOwnerId.value || !selectedGroupIds.value.length)
-    return window.alert("请先选择用户和至少一个 1688 分组");
+function scopePayload() {
+  return {
+    owner_id: selectedGroupIds.value.length ? selectedOwnerId.value : null,
+    group_ids: selectedGroupIds.value,
+  };
+}
+
+async function enqueueSelectedScope(config) {
   if (
     !window.confirm(
-      `确认只清除并重建所选 ${selectedGroupIds.value.length} 个分组中的向量？可处理商品约 ${selectedReadyCount.value} 个，跨分组商品会自动去重。`,
+      `确认手动启动 ${scopeDescription.value} 的向量化？已有有效任务和向量不会重复创建。`,
+    )
+  )
+    return;
+  await api(`/api/similarity/admin/configs/${config.id}/enqueue`, {
+    method: "POST",
+    body: JSON.stringify(scopePayload()),
+  });
+  await load();
+}
+
+async function rebuild(config) {
+  if (
+    !window.confirm(
+      `确认清除并重建 ${scopeDescription.value} 的任务、候选和向量？此操作会删除该范围已有结果。`,
     )
   )
     return;
   await api(`/api/similarity/admin/configs/${config.id}/rebuild`, {
     method: "POST",
-    body: JSON.stringify({
-      owner_id: selectedOwnerId.value,
-      group_ids: selectedGroupIds.value,
-    }),
+    body: JSON.stringify(scopePayload()),
   });
   await load();
 }
@@ -361,7 +392,9 @@ onUnmounted(() => window.clearInterval(refreshTimer));
       <div class="section-heading">
         <div>
           <h3>向量化运行范围</h3>
-          <span>先选择用户，再选择一个或多个 1688 分组</span>
+          <span
+            >选择具体用户和分组；不选择任何分组时表示全部用户、全部分组</span
+          >
         </div>
       </div>
       <label class="owner-select"
@@ -386,9 +419,14 @@ onUnmounted(() => window.clearInterval(refreshTimer));
         <p v-if="!scopes.length" class="empty">该用户暂无 1688 分组</p>
       </div>
       <p class="form-help">
-        当前选择 {{ selectedGroupIds.length }} 个分组，预计可处理
-        {{ selectedReadyCount }}
-        个分组成员；同一商品存在于多个分组时后端只处理一次。
+        当前范围：{{ scopeDescription }}。
+        <template v-if="selectedGroupIds.length">
+          分组内图片就绪成员约
+          {{ selectedReadyCount }} 个；跨分组商品只处理一次。
+        </template>
+        <template v-else>
+          手动启动或清除重建时会处理数据库中的全部 1688 商品。
+        </template>
       </p>
     </section>
 
@@ -508,7 +546,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           />保存后设为当前模型</label
         >
         <p class="wide form-help">
-          保存并启用新模型时，仅当已选择运行分组才会清理这些商品的旧任务、候选和向量并重新排队；未选分组不会被处理。
+          保存或启用模型只更新配置，不会把历史商品自动加入队列。历史商品必须使用下方“手动启动向量化”；新采集商品是否自动入队由顶部开关控制。
         </p>
         <div class="wide config-actions">
           <button :disabled="saving">
@@ -517,10 +555,17 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           <button
             v-if="form.id"
             type="button"
+            @click="enqueueSelectedScope(form)"
+          >
+            手动启动向量化
+          </button>
+          <button
+            v-if="form.id"
+            type="button"
             class="secondary"
             @click="rebuild(form)"
           >
-            清除并重建所选分组
+            清除并重建当前范围
           </button>
           <button
             v-if="form.id"

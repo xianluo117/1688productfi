@@ -29,6 +29,7 @@ from app.similarity_services import (
     normalize_vector,
     phash_distance,
     prepare_embedding_image,
+    enqueue_scope_products,
     queue_control,
     reset_embedding_scope,
     scope_product_ids,
@@ -47,6 +48,21 @@ def product(offer_id: str, pieces: int, daily: str) -> Product:
         daily_orders=Decimal(daily),
         last_collected_at=datetime.now(timezone.utc),
     )
+
+
+def test_embedding_config_trims_api_key_whitespace():
+    from app.schemas import ImageEmbeddingConfigUpsert
+
+    payload = ImageEmbeddingConfigUpsert(
+        name="test",
+        base_url="https://example.com",
+        api_key="  secret-token\r\n",
+        model_name="gemini-embedding-2",
+        output_dimension=1536,
+        response_path="embedding.values",
+        activate=False,
+    )
+    assert payload.api_key == "secret-token"
 
 
 def test_batch_decision_request_deduplicates_candidate_ids():
@@ -186,16 +202,38 @@ def test_scope_product_ids_deduplicates_products_across_groups():
         assert scope_product_ids(db, owner.id, [left.id, right.id]) == [item.id]
 
 
-def test_scope_product_ids_rejects_empty_scope():
+def test_scope_product_ids_empty_scope_returns_all_products():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        try:
-            scope_product_ids(db, 1, [])
-        except ValueError as exc:
-            assert "至少选择一个" in str(exc)
-        else:
-            raise AssertionError("empty scope must be rejected")
+        first = product("701", 10, "1")
+        second = product("702", 20, "2")
+        db.add_all([first, second])
+        db.flush()
+        assert scope_product_ids(db, None, []) == [first.id, second.id]
+
+
+def test_enqueue_scope_products_skips_duplicate_current_task():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        config = ImageEmbeddingConfig(
+            name="test",
+            base_url="https://example.com/v1beta",
+            model_name="gemini-embedding-2",
+            output_dimension=1536,
+            request_template={},
+            response_path="embedding.values",
+        )
+        item = product("703", 10, "1")
+        item.cached_image_name = "703.jpg"
+        item.image_status = "ready"
+        db.add_all([config, item])
+        db.flush()
+        assert enqueue_scope_products(db, config, [item.id]) == 1
+        db.flush()
+        assert enqueue_scope_products(db, config, [item.id]) == 1
+        assert db.query(SimilarityTask).count() == 1
 
 
 def test_reset_embedding_scope_preserves_unselected_tasks():

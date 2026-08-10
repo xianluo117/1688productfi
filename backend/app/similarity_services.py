@@ -118,10 +118,16 @@ def enqueue_product(db: Session, product: Product, config: ImageEmbeddingConfig 
     return task
 
 
-def scope_product_ids(db: Session, owner_id: int, group_ids: list[int]) -> list[int]:
-    """返回指定用户和 1688 分组范围内去重后的商品 ID。"""
+def scope_product_ids(
+    db: Session,
+    owner_id: int | None,
+    group_ids: list[int],
+) -> list[int]:
+    """返回运行范围内去重商品；空分组表示全部用户的全部分组。"""
     if not group_ids:
-        raise ValueError("至少选择一个 1688 分组")
+        return list(db.scalars(select(Product.id).order_by(Product.id)))
+    if owner_id is None:
+        raise ValueError("选择具体分组时必须指定用户")
     valid_group_count = db.scalar(
         select(func.count(ProductGroup.id)).where(
             ProductGroup.owner_id == owner_id,

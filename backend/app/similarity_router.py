@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from datetime import datetime, timezone
 from time import perf_counter
 from typing import Annotated, Literal
@@ -30,6 +31,7 @@ from .schemas import (
     SimilarityBatchDecisionResponse,
     SimilarityCandidateResponse,
     SimilarityClusterResponse,
+    SimilarityConnectionTestRequest,
     SimilarityConnectionTestResponse,
     SimilarityDecisionRequest,
     SimilarityProductResponse,
@@ -51,6 +53,7 @@ from .similarity_services import (
     merge_products,
     product_sources,
     queue_control,
+    enqueue_scope_products,
     recalculate_cluster_representative,
     request_embedding,
     reset_embedding_scope,
@@ -129,19 +132,6 @@ def create_config(
         created_by=admin.id,
     )
     db.add(config)
-    db.flush()
-    if config.is_active:
-        if payload.owner_id is None or not payload.group_ids:
-            raise HTTPException(
-                status_code=422,
-                detail="启用模型时必须选择用户和至少一个 1688 分组",
-            )
-        try:
-            product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        reset_embedding_scope(db, config, product_ids, clear_all_configs=True)
-        queue_control(db).state = "running"
     db.commit()
     db.refresh(config)
     return config_response(config)
@@ -174,23 +164,31 @@ def update_config(
     current.auto_merge_threshold = payload.auto_merge_threshold
     current.auto_merge_enabled = payload.auto_merge_enabled
     if payload.activate:
-        if not current.is_active:
-            if payload.owner_id is None or not payload.group_ids:
-                raise HTTPException(
-                    status_code=422,
-                    detail="启用模型时必须选择用户和至少一个 1688 分组",
-                )
-            try:
-                product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-            reset_embedding_scope(db, current, product_ids, clear_all_configs=True)
-            queue_control(db).state = "running"
         db.execute(update(ImageEmbeddingConfig).where(ImageEmbeddingConfig.id != current.id).values(is_active=False))
         current.is_active = True
     db.commit()
     db.refresh(current)
     return config_response(current)
+
+
+@router.post("/admin/configs/{config_id}/enqueue", response_model=SimilarityTaskStatsResponse)
+def enqueue_config_scope(
+    config_id: int,
+    payload: SimilarityScopeRequest,
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityTaskStatsResponse:
+    config = db.get(ImageEmbeddingConfig, config_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="模型配置不存在")
+    try:
+        product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    enqueue_scope_products(db, config, product_ids)
+    queue_control(db).state = "running"
+    db.commit()
+    return SimilarityTaskStatsResponse(**task_stats(db))
 
 
 @router.post("/admin/configs/{config_id}/rebuild", response_model=SimilarityTaskStatsResponse)
@@ -379,12 +377,21 @@ def clear_failed_tasks(
 @router.post("/admin/configs/{config_id}/test", response_model=SimilarityConnectionTestResponse)
 async def test_config(
     config_id: int,
+    payload: SimilarityConnectionTestRequest,
     _: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> SimilarityConnectionTestResponse:
-    config = db.get(ImageEmbeddingConfig, config_id)
-    if not config:
+    saved_config = db.get(ImageEmbeddingConfig, config_id)
+    if not saved_config:
         raise HTTPException(status_code=404, detail="模型配置不存在")
+    config = copy(saved_config)
+    config.base_url = str(payload.base_url)
+    config.model_name = payload.model_name
+    config.output_dimension = payload.output_dimension
+    config.response_path = payload.response_path
+    config.timeout_seconds = payload.timeout_seconds
+    if payload.api_key is not None:
+        config.api_key_encrypted = encrypt_api_key(payload.api_key, settings)
     product = db.scalar(
         select(Product)
         .where(Product.cached_image_name.is_not(None), Product.image_status == "ready")

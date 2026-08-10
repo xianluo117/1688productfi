@@ -152,6 +152,14 @@ class ImageEmbeddingConfigUpsert(BaseModel):
     owner_id: int | None = Field(default=None, gt=0)
     group_ids: list[int] = Field(default_factory=list)
 
+    @field_validator("api_key")
+    @classmethod
+    def clean_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
     @field_validator("group_ids")
     @classmethod
     def unique_scope_group_ids(cls, value: list[int]) -> list[int]:
@@ -263,8 +271,8 @@ class SimilarityQueueUpdate(BaseModel):
 
 
 class SimilarityScopeRequest(BaseModel):
-    owner_id: int = Field(gt=0)
-    group_ids: list[int] = Field(min_length=1)
+    owner_id: int | None = Field(default=None, gt=0)
+    group_ids: list[int] = Field(default_factory=list)
 
     @field_validator("group_ids")
     @classmethod
@@ -295,6 +303,23 @@ class SimilarityTaskResponse(BaseModel):
     locked_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+
+
+class SimilarityConnectionTestRequest(BaseModel):
+    base_url: HttpUrl
+    api_key: str | None = Field(default=None, max_length=4000)
+    model_name: str = Field(min_length=1, max_length=255)
+    output_dimension: int = Field(gt=0, le=1536)
+    response_path: str = Field(default="embedding.values", min_length=1, max_length=255)
+    timeout_seconds: int = Field(default=60, ge=5, le=600)
+
+    @field_validator("api_key")
+    @classmethod
+    def clean_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
 
 class SimilarityConnectionTestResponse(BaseModel):
