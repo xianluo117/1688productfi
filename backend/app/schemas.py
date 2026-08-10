@@ -141,7 +141,6 @@ class ImageEmbeddingConfigUpsert(BaseModel):
     api_key: str | None = Field(default=None, max_length=4000)
     model_name: str = Field(min_length=1, max_length=255)
     output_dimension: int = Field(gt=0, le=1536)
-    request_template: dict
     response_path: str = Field(default="embedding.values", min_length=1, max_length=255)
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     top_k: int = Field(default=100, ge=1, le=500)
@@ -234,6 +233,22 @@ class SimilarityCandidateResponse(BaseModel):
 
 class SimilarityDecisionRequest(BaseModel):
     decision: Literal["approve", "reject"]
+
+
+class SimilarityBatchDecisionRequest(SimilarityDecisionRequest):
+    candidate_ids: list[int] = Field(min_length=1, max_length=200)
+
+    @field_validator("candidate_ids")
+    @classmethod
+    def unique_candidate_ids(cls, value: list[int]) -> list[int]:
+        if any(candidate_id <= 0 for candidate_id in value):
+            raise ValueError("candidate IDs must be positive")
+        return list(dict.fromkeys(value))
+
+
+class SimilarityBatchDecisionResponse(BaseModel):
+    decision: Literal["approve", "reject"]
+    processed: int
 
 
 class SimilarityClusterResponse(BaseModel):

@@ -22,24 +22,12 @@ const scopes = ref([]);
 const selectedOwnerId = ref(null);
 const selectedGroupIds = ref([]);
 const failedTasks = ref([]);
+const selectedCandidateIds = ref([]);
+const batchDeciding = ref(false);
 const testing = ref(false);
 const testResult = ref(null);
 const saving = ref(false);
 let refreshTimer;
-const geminiTemplate = {
-  content: {
-    parts: [
-      {
-        inline_data: {
-          mime_type: "image/jpeg",
-          data: "{{image_base64}}",
-        },
-      },
-    ],
-  },
-  output_dimensionality: "{{output_dimension}}",
-};
-const requestTemplateText = ref(JSON.stringify(geminiTemplate, null, 2));
 const form = reactive({
   id: null,
   name: "Gemini 图片向量模型",
@@ -59,6 +47,13 @@ const form = reactive({
 
 const selectedScopeGroups = computed(() =>
   scopes.value.filter((group) => selectedGroupIds.value.includes(group.id)),
+);
+const allCandidatesSelected = computed(
+  () =>
+    candidates.value.length > 0 &&
+    candidates.value.every((candidate) =>
+      selectedCandidateIds.value.includes(candidate.id),
+    ),
 );
 const selectedReadyCount = computed(() =>
   selectedScopeGroups.value.reduce(
@@ -85,6 +80,9 @@ async function load() {
     api("/api/similarity/admin/tasks?status=failed&limit=100"),
   ]);
   Object.assign(stats, await api("/api/similarity/admin/stats"));
+  selectedCandidateIds.value = selectedCandidateIds.value.filter((id) =>
+    candidates.value.some((candidate) => candidate.id === id),
+  );
   if (!form.id && configs.value.length) selectConfig(configs.value[0]);
   if (!selectedOwnerId.value && props.users.length) {
     selectedOwnerId.value = props.users[0].id;
@@ -97,12 +95,6 @@ function selectConfig(config) {
     api_key: "",
     activate: config.is_active,
   });
-  requestTemplateText.value = JSON.stringify(config.request_template, null, 2);
-}
-
-function useGeminiPreset() {
-  requestTemplateText.value = JSON.stringify(geminiTemplate, null, 2);
-  form.response_path = "embedding.values";
 }
 
 function createNew() {
@@ -122,16 +114,9 @@ function createNew() {
     auto_merge_enabled: false,
     activate: true,
   });
-  useGeminiPreset();
 }
 
 async function saveConfig() {
-  let requestTemplate;
-  try {
-    requestTemplate = JSON.parse(requestTemplateText.value);
-  } catch {
-    return window.alert("请求模板不是有效 JSON");
-  }
   saving.value = true;
   try {
     const path = form.id
@@ -142,7 +127,6 @@ async function saveConfig() {
       method,
       body: JSON.stringify({
         ...form,
-        request_template: requestTemplate,
         api_key: form.api_key || null,
         owner_id: selectedOwnerId.value,
         group_ids: selectedGroupIds.value,
@@ -253,7 +237,41 @@ async function decide(candidate, decision) {
     method: "POST",
     body: JSON.stringify({ decision }),
   });
+  selectedCandidateIds.value = selectedCandidateIds.value.filter(
+    (id) => id !== candidate.id,
+  );
   await load();
+}
+
+function toggleSelectAll() {
+  selectedCandidateIds.value = allCandidatesSelected.value
+    ? []
+    : candidates.value.map((candidate) => candidate.id);
+}
+
+async function batchDecide(decision) {
+  if (!selectedCandidateIds.value.length) return;
+  const label = decision === "approve" ? "确认同款并合并" : "拒绝";
+  if (
+    !window.confirm(
+      `确认批量${label}已选择的 ${selectedCandidateIds.value.length} 组候选？`,
+    )
+  )
+    return;
+  batchDeciding.value = true;
+  try {
+    await api("/api/similarity/admin/candidates/batch-decision", {
+      method: "POST",
+      body: JSON.stringify({
+        candidate_ids: selectedCandidateIds.value,
+        decision,
+      }),
+    });
+    selectedCandidateIds.value = [];
+    await load();
+  } finally {
+    batchDeciding.value = false;
+  }
 }
 
 function formatScore(value) {
@@ -411,9 +429,11 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             required
         /></label>
         <p class="wide form-help">
-          可填写 Gemini Base URL、自定义代理 Base URL 或完整的
-          models/gemini-embedding-2:embedContent 地址。填写 Base URL
-          时，后端自动追加模型与 :embedContent。
+          当前代理填写 https://newapi.momoaisite.com 即可，末尾 `/`
+          可有可无；后端会自动生成
+          `/v1beta/models/gemini-embedding-2:embedContent`。也可直接填写带
+          `/v1beta` 的 Base URL 或完整 embedContent 地址。不要填写
+          `/v1`，除非代理服务明确要求该版本。
         </p>
         <label
           >第三方 API Key<input
@@ -470,18 +490,11 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             max="1"
             step="0.001"
         /></label>
-        <label class="wide"
-          >请求 JSON 模板<textarea
-            v-model="requestTemplateText"
-            rows="9"
-            spellcheck="false"
-          />
-        </label>
-        <div class="wide config-actions">
-          <button type="button" class="secondary" @click="useGeminiPreset">
-            恢复 Gemini 图片模板
-          </button>
-        </div>
+        <p class="wide form-help request-format-note">
+          请求体由后台按 Gemini embedContent 图片格式自动生成，包括
+          content.parts.inline_data 和 output_dimensionality，无需手工填写
+          JSON。
+        </p>
         <label class="switch-field"
           ><input
             v-model="form.auto_merge_enabled"
@@ -520,9 +533,8 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           </button>
         </div>
         <p class="wide form-help">
-          默认请求使用 content.parts.inline_data 传输 JPEG 图片，响应向量读取
-          embedding.values。自定义代理字段不同时，可修改 JSON
-          模板和响应路径。模板占位符：model、output_dimension、image_base64、image_data_url、image_url、product_id，使用双大括号包裹。
+          请求使用 content.parts.inline_data 传输 JPEG 图片，响应向量默认读取
+          embedding.values。自定义代理的响应字段不同时，只需修改响应路径。
         </p>
         <p
           v-if="testResult"
@@ -556,9 +568,32 @@ onUnmounted(() => window.clearInterval(refreshTimer));
     </section>
 
     <section class="review-panel">
-      <div class="section-heading">
-        <h3>疑似同款审核</h3>
-        <span>{{ candidates.length }} 组</span>
+      <div class="section-heading candidate-review-heading">
+        <div>
+          <h3>疑似同款审核</h3>
+          <span
+            >{{ candidates.length }} 组，已选择
+            {{ selectedCandidateIds.length }} 组</span
+          >
+        </div>
+        <div v-if="candidates.length" class="section-heading-actions">
+          <button class="secondary" @click="toggleSelectAll">
+            {{ allCandidatesSelected ? "取消全选" : "本页全选" }}
+          </button>
+          <button
+            :disabled="!selectedCandidateIds.length || batchDeciding"
+            @click="batchDecide('approve')"
+          >
+            批量确认同款
+          </button>
+          <button
+            class="danger"
+            :disabled="!selectedCandidateIds.length || batchDeciding"
+            @click="batchDecide('reject')"
+          >
+            批量拒绝
+          </button>
+        </div>
       </div>
       <div v-if="!candidates.length" class="empty review-empty">
         暂无待审核候选
@@ -567,7 +602,15 @@ onUnmounted(() => window.clearInterval(refreshTimer));
         v-for="candidate in candidates"
         :key="candidate.id"
         class="candidate-card"
+        :class="{ selected: selectedCandidateIds.includes(candidate.id) }"
       >
+        <label class="candidate-select" title="选择该候选">
+          <input
+            v-model="selectedCandidateIds"
+            type="checkbox"
+            :value="candidate.id"
+          />
+        </label>
         <div class="candidate-product">
           <img
             v-if="candidate.left.image_url"

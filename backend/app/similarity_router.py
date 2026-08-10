@@ -26,6 +26,8 @@ from .models import (
 from .schemas import (
     ImageEmbeddingConfigResponse,
     ImageEmbeddingConfigUpsert,
+    SimilarityBatchDecisionRequest,
+    SimilarityBatchDecisionResponse,
     SimilarityCandidateResponse,
     SimilarityClusterResponse,
     SimilarityConnectionTestResponse,
@@ -43,6 +45,7 @@ from .similarity_services import (
     decrypt_api_key,
     embedding_endpoint_url,
     encrypt_api_key,
+    gemini_request_template,
     image_fingerprints,
     mask_api_key,
     merge_products,
@@ -68,7 +71,7 @@ def config_response(config: ImageEmbeddingConfig) -> ImageEmbeddingConfigRespons
         api_key_masked=mask_api_key(key),
         model_name=config.model_name,
         output_dimension=config.output_dimension,
-        request_template=config.request_template,
+        request_template=gemini_request_template(),
         response_path=config.response_path,
         timeout_seconds=config.timeout_seconds,
         top_k=config.top_k,
@@ -114,7 +117,7 @@ def create_config(
         api_key_encrypted=encrypt_api_key(payload.api_key, settings),
         model_name=payload.model_name,
         output_dimension=payload.output_dimension,
-        request_template=payload.request_template,
+        request_template=gemini_request_template(),
         response_path=payload.response_path,
         timeout_seconds=payload.timeout_seconds,
         top_k=payload.top_k,
@@ -158,7 +161,6 @@ def update_config(
         current.base_url != str(payload.base_url)
         or current.model_name != payload.model_name
         or current.output_dimension != payload.output_dimension
-        or current.request_template != payload.request_template
         or current.response_path != payload.response_path
         or payload.api_key is not None
     )
@@ -439,6 +441,69 @@ def candidates(
     return result
 
 
+def apply_candidate_decision(
+    db: Session,
+    candidate: ProductSimilarityCandidate,
+    decision: Literal["approve", "reject"],
+    admin_id: int,
+) -> None:
+    candidate.reviewed_by = admin_id
+    candidate.reviewed_at = datetime.now(timezone.utc)
+    candidate.decision_source = "manual"
+    if decision == "approve":
+        candidate.status = "approved"
+        merge_products(
+            db,
+            candidate.left_product_id,
+            candidate.right_product_id,
+            "manual",
+            candidate.image_similarity,
+            actor_id=admin_id,
+            candidate_id=candidate.id,
+        )
+        return
+    candidate.status = "rejected"
+    db.add(SimilarityAuditLog(
+        action="reject",
+        actor_id=admin_id,
+        candidate_id=candidate.id,
+        payload={"left_product_id": candidate.left_product_id, "right_product_id": candidate.right_product_id},
+    ))
+
+
+@router.post("/admin/candidates/batch-decision", response_model=SimilarityBatchDecisionResponse)
+def decide_candidates_batch(
+    payload: SimilarityBatchDecisionRequest,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityBatchDecisionResponse:
+    candidates = list(db.scalars(
+        select(ProductSimilarityCandidate)
+        .where(ProductSimilarityCandidate.id.in_(payload.candidate_ids))
+        .order_by(ProductSimilarityCandidate.id)
+        .with_for_update()
+    ))
+    if len(candidates) != len(payload.candidate_ids):
+        raise HTTPException(status_code=404, detail="部分候选记录不存在")
+    invalid_ids = [candidate.id for candidate in candidates if candidate.status != "pending"]
+    if invalid_ids:
+        raise HTTPException(
+            status_code=409,
+            detail=f"部分候选已审批，请刷新后重试：{invalid_ids}",
+        )
+    try:
+        for candidate in candidates:
+            apply_candidate_decision(db, candidate, payload.decision, admin.id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return SimilarityBatchDecisionResponse(
+        decision=payload.decision,
+        processed=len(candidates),
+    )
+
+
 @router.post("/admin/candidates/{candidate_id}/decision", response_model=SimilarityCandidateResponse)
 def decide_candidate(
     candidate_id: int,
@@ -449,29 +514,7 @@ def decide_candidate(
     candidate = db.get(ProductSimilarityCandidate, candidate_id)
     if not candidate:
         raise HTTPException(status_code=404, detail="候选记录不存在")
-    now = datetime.now(timezone.utc)
-    candidate.reviewed_by = admin.id
-    candidate.reviewed_at = now
-    candidate.decision_source = "manual"
-    if payload.decision == "approve":
-        candidate.status = "approved"
-        merge_products(
-            db,
-            candidate.left_product_id,
-            candidate.right_product_id,
-            "manual",
-            candidate.image_similarity,
-            actor_id=admin.id,
-            candidate_id=candidate.id,
-        )
-    else:
-        candidate.status = "rejected"
-        db.add(SimilarityAuditLog(
-            action="reject",
-            actor_id=admin.id,
-            candidate_id=candidate.id,
-            payload={"left_product_id": candidate.left_product_id, "right_product_id": candidate.right_product_id},
-        ))
+    apply_candidate_decision(db, candidate, payload.decision, admin.id)
     db.commit()
     left = db.get(Product, candidate.left_product_id)
     right = db.get(Product, candidate.right_product_id)

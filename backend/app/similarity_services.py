@@ -35,6 +35,23 @@ from .models import (
 VECTOR_STORAGE_DIMENSION = 1536
 
 
+def gemini_request_template() -> dict[str, Any]:
+    """返回系统维护的 Gemini 图片向量请求结构。"""
+    return {
+        "content": {
+            "parts": [
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": "{{image_base64}}",
+                    }
+                }
+            ]
+        },
+        "output_dimensionality": "{{output_dimension}}",
+    }
+
+
 def _fernet(settings: Settings) -> Fernet:
     digest = hashlib.sha256(settings.resolved_ai_secret_key.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
@@ -268,7 +285,7 @@ def build_embedding_request(config: ImageEmbeddingConfig, product: Product, cont
         "{{image_url}}": product.original_image_url or "",
         "{{product_id}}": product.offer_id,
     }
-    return _replace_template(config.request_template, replacements)
+    return _replace_template(gemini_request_template(), replacements)
 
 
 def extract_response_path(payload: Any, path: str) -> Any:

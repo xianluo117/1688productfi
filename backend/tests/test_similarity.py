@@ -7,15 +7,19 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.schemas import SimilarityBatchDecisionRequest
 from app.models import (
     AdminUser,
     ImageEmbeddingConfig,
     Product,
     ProductGroup,
     ProductGroupMembership,
+    ProductSimilarityCandidate,
     ProductSimilarityClusterMember,
+    SimilarityAuditLog,
     SimilarityTask,
 )
+from app.similarity_router import apply_candidate_decision
 from app.similarity_services import (
     VECTOR_STORAGE_DIMENSION,
     build_embedding_request,
@@ -42,6 +46,49 @@ def product(offer_id: str, pieces: int, daily: str) -> Product:
         daily_orders=Decimal(daily),
         last_collected_at=datetime.now(timezone.utc),
     )
+
+
+def test_batch_decision_request_deduplicates_candidate_ids():
+    payload = SimilarityBatchDecisionRequest(
+        candidate_ids=[3, 1, 3, 2],
+        decision="approve",
+    )
+    assert payload.candidate_ids == [3, 1, 2]
+    assert payload.decision == "approve"
+
+
+def test_apply_candidate_reject_creates_manual_audit_record():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        admin = AdminUser(username="admin", password_hash="hash", role="admin")
+        left = product("601", 10, "1")
+        right = product("602", 20, "2")
+        config = ImageEmbeddingConfig(
+            name="test",
+            base_url="https://example.com/v1beta",
+            model_name="gemini-embedding-2",
+            output_dimension=1536,
+            request_template={},
+            response_path="embedding.values",
+        )
+        db.add_all([admin, left, right, config])
+        db.flush()
+        candidate = ProductSimilarityCandidate(
+            left_product_id=left.id,
+            right_product_id=right.id,
+            config_id=config.id,
+            status="pending",
+        )
+        db.add(candidate)
+        db.flush()
+        apply_candidate_decision(db, candidate, "reject", admin.id)
+        db.flush()
+        audit = db.query(SimilarityAuditLog).one()
+        assert candidate.status == "rejected"
+        assert candidate.reviewed_by == admin.id
+        assert audit.action == "reject"
+        assert audit.candidate_id == candidate.id
 
 
 def test_normalize_vector_pads_fixed_storage_dimension():
@@ -99,21 +146,17 @@ def test_queue_control_defaults_to_running_with_four_workers():
         assert control.auto_vectorization_enabled is True
 
 
-def test_request_template_replaces_gemini_image_placeholders():
+def test_embedding_request_uses_managed_gemini_image_format():
     class Config:
         model_name = "gemini-embedding-2"
         output_dimension = 1536
-        request_template = {
-            "content": {
-                "parts": [{"inline_data": {"mime_type": "image/jpeg", "data": "{{image_base64}}"}}]
-            },
-            "output_dimensionality": "{{output_dimension}}",
-        }
+        request_template = {"content": {"parts": []}}
 
     item = product("123", 10, "1")
     item.cached_image_name = "123.jpg"
     payload = build_embedding_request(Config(), item, b"image")
     assert payload["content"]["parts"][0]["inline_data"]["data"] == "aW1hZ2U="
+    assert payload["content"]["parts"][0]["inline_data"]["mime_type"] == "image/jpeg"
     assert payload["output_dimensionality"] == 1536
 
 
