@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         Temu 商品与云启数据追加采集器
 // @namespace    https://www.temu.com/
-// @version      0.2.1
+// @version      0.2.3
 // @description  依赖云启数据扩展，采集 Temu 商品、销量、销售额、店铺信息，自动点击 See more，支持令牌上传与 CSV 导出
 // @author       Zoo
 // @match        https://www.temu.com/*
 // @match        https://www.temu.com/
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
 // @connect      *
 // @run-at       document-start
@@ -99,26 +101,33 @@
   }
 
   function loadApiConfig() {
-    try {
-      return {
-        baseUrl: "",
-        apiToken: "",
-        selectedGroupId: "",
-        groupNameInput: "",
-        ...JSON.parse(localStorage.getItem(CONFIG_KEY) || "{}"),
-      };
-    } catch (_error) {
-      return {
-        baseUrl: "",
-        apiToken: "",
-        selectedGroupId: "",
-        groupNameInput: "",
-      };
+    const defaults = {
+      baseUrl: "",
+      apiToken: "",
+      selectedGroupId: "",
+      groupNameInput: "",
+    };
+    const saved = GM_getValue(CONFIG_KEY, null);
+    if (saved && typeof saved === "object") {
+      return { ...defaults, ...saved };
     }
+
+    // 从旧版 Temu 域名 localStorage 迁移，避免升级脚本后丢失已有配置。
+    try {
+      const legacy = JSON.parse(localStorage.getItem(CONFIG_KEY) || "null");
+      if (legacy && typeof legacy === "object") {
+        const migrated = { ...defaults, ...legacy };
+        GM_setValue(CONFIG_KEY, migrated);
+        return migrated;
+      }
+    } catch (_error) {
+      // 旧配置损坏时使用默认值。
+    }
+    return defaults;
   }
 
   function saveApiConfig(config) {
-    localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+    GM_setValue(CONFIG_KEY, config);
   }
 
   function normalizeBaseUrl(value) {
@@ -310,6 +319,34 @@
       }
     }
     return "";
+  }
+
+  function extractNativeImageUrl(card) {
+    const mainImageUrl = normalizeUrl(
+      firstAttribute(
+        card,
+        ['img[data-js-main-img="true"]'],
+        ["currentSrc", "src", "data-src"],
+      ),
+    );
+    if (mainImageUrl) {
+      return mainImageUrl;
+    }
+
+    const videoPosterUrl = normalizeUrl(
+      firstAttribute(card, ["video[poster]"], ["poster"]),
+    );
+    if (videoPosterUrl) {
+      return videoPosterUrl;
+    }
+
+    return normalizeUrl(
+      firstAttribute(
+        card,
+        ["img[data-cui-image]", ".goods-img-external img", "img"],
+        ["currentSrc", "src", "data-src"],
+      ),
+    );
   }
 
   function extractLabeledValue(root, labelText) {
@@ -522,13 +559,7 @@
       '[aria-label*="stars"]',
     ]);
     const reviewRaw = firstText(card, ["._3cWlbpFG", '[class*="review"]']);
-    const imageUrl = normalizeUrl(
-      firstAttribute(
-        card,
-        ['img[data-js-main-img="true"]', "img[data-cui-image]", "img"],
-        ["currentSrc", "src", "data-src"],
-      ),
-    );
+    const imageUrl = extractNativeImageUrl(card);
     const cardText = cleanText(card.textContent);
     const exactElementTexts = new Set(
       Array.from(card.querySelectorAll("span, div"), (element) =>
@@ -843,6 +874,7 @@
       if (existing) {
         duplicates += 1;
         Object.assign(existing, record, {
+          imageUrl: record.imageUrl || existing.imageUrl || "",
           sourcePage: existing.sourcePage,
           firstSeenAt: existing.firstSeenAt,
           lastSeenAt: new Date().toISOString(),
@@ -1172,6 +1204,53 @@
     saveState();
   }
 
+  async function savePanelConfig() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) {
+      return;
+    }
+
+    const maxLoads = Number.parseInt(
+      panel.querySelector("#zoo-temu-max-loads").value,
+      10,
+    );
+    state.maxLoads =
+      Number.isInteger(maxLoads) && maxLoads >= 0
+        ? maxLoads
+        : DEFAULT_MAX_LOADS;
+
+    const config = {
+      ...loadApiConfig(),
+      baseUrl: normalizeBaseUrl(panel.querySelector("#zoo-temu-api-url").value),
+      apiToken: cleanText(panel.querySelector("#zoo-temu-api-token").value),
+      groupNameInput: cleanText(
+        panel.querySelector("#zoo-temu-group-name").value,
+      ),
+      selectedGroupId: panel.querySelector("#zoo-temu-group").value,
+    };
+    if (!config.baseUrl || !config.apiToken) {
+      state.status = "请填写后台地址，并粘贴与 1688 相同的个人采集令牌";
+      saveState();
+      return;
+    }
+
+    saveApiConfig(config);
+    panel.querySelector("#zoo-temu-api-url").value = config.baseUrl;
+    panel.querySelector("#zoo-temu-api-token").value = config.apiToken;
+    panel.querySelector("#zoo-temu-group-name").value = config.groupNameInput;
+    panel.querySelector("#zoo-temu-max-loads").value = String(state.maxLoads);
+
+    state.status = "配置已保存，正在验证统一令牌并加载 Temu 分组";
+    saveState();
+    try {
+      const groups = await loadBackendGroups(config.selectedGroupId);
+      state.status = `配置有效，已加载 ${groups.length} 个 Temu 分组`;
+    } catch (error) {
+      state.status = `配置已保存，但 Temu 分组加载失败：${error.message}`;
+    }
+    saveState();
+  }
+
   function csvEscape(value) {
     const text = String(value ?? "");
     return `"${text.replace(/"/g, '""')}"`;
@@ -1333,6 +1412,7 @@
         background: #222;
         color: #fff;
       }
+      #${PANEL_ID} button.zoo-save { background: #175cd3; }
       #${PANEL_ID} button.zoo-stop { background: #b42318; }
       #${PANEL_ID} button.zoo-export { background: #087443; }
       #${PANEL_ID} button.zoo-clear { background: #666; }
@@ -1368,15 +1448,16 @@
         <span>ShadowRoot</span><span class="zoo-value" data-value="shadows">0</span>
         <span>云启卡片</span><span class="zoo-value" data-value="yunqi">0</span>
       </div>
-      <label class="zoo-field"><span>后台地址</span><input id="zoo-temu-api-url" value="${loadApiConfig().baseUrl}" placeholder="https://products.example.com"></label>
-      <label class="zoo-field"><span>个人采集令牌</span><input id="zoo-temu-api-token" type="password" value="${loadApiConfig().apiToken}" placeholder="zoo_..."></label>
-      <label class="zoo-field"><span>已有 Temu 分组</span><select id="zoo-temu-group"><option value="">加载中</option></select></label>
+      <label class="zoo-field"><span>后台地址</span><input id="zoo-temu-api-url" value="${loadApiConfig().baseUrl}" placeholder="与 1688 采集器相同"></label>
+      <label class="zoo-field"><span>统一个人采集令牌</span><input id="zoo-temu-api-token" type="password" value="${loadApiConfig().apiToken}" placeholder="粘贴 1688 使用的 zoo_... 令牌"></label>
+      <label class="zoo-field"><span>已有 Temu 分组</span><select id="zoo-temu-group"><option value="">请先保存配置并加载</option></select></label>
       <label class="zoo-field"><span>分组名称（存在则复用）</span><input id="zoo-temu-group-name" value="${loadApiConfig().groupNameInput}" placeholder="例如：女装趋势"></label>
       <label class="zoo-field">
         <span>最大成功翻页次数</span>
         <input id="zoo-temu-max-loads" type="number" min="0" max="10000" value="${state.maxLoads}">
       </label>
       <div class="zoo-actions">
+        <button type="button" class="zoo-save" data-action="save">保存配置并加载分组</button>
         <button type="button" data-action="start">开始采集</button>
         <button type="button" class="zoo-stop" data-action="stop">停止</button>
         <button type="button" class="zoo-export" data-action="export">导出 CSV</button>
@@ -1386,6 +1467,9 @@
     `;
     document.body.appendChild(panel);
 
+    panel
+      .querySelector('[data-action="save"]')
+      .addEventListener("click", savePanelConfig);
     panel
       .querySelector('[data-action="start"]')
       .addEventListener("click", runCollector);
@@ -1398,10 +1482,15 @@
     panel
       .querySelector('[data-action="clear"]')
       .addEventListener("click", clearCollectorState);
-    loadBackendGroups().catch((error) => {
-      state.status = `分组加载失败：${error.message}`;
-      saveState();
-    });
+    const apiConfig = loadApiConfig();
+    if (apiConfig.baseUrl && apiConfig.apiToken) {
+      loadBackendGroups(apiConfig.selectedGroupId).catch((error) => {
+        state.status = `Temu 分组加载失败：${error.message}`;
+        saveState();
+      });
+    } else {
+      state.status = "请填写后台地址和统一个人令牌，然后保存配置并加载分组";
+    }
     updatePanel();
   }
 
@@ -1426,6 +1515,7 @@
         element.textContent = String(value ?? "");
       }
     }
+    panel.querySelector('[data-action="save"]').disabled = state.active;
     panel.querySelector('[data-action="start"]').disabled = state.active;
     panel.querySelector('[data-action="stop"]').disabled = !state.active;
     panel.querySelector('[data-action="export"]').disabled =

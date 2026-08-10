@@ -30,14 +30,20 @@ def create_user(db: Session, username: str) -> AdminUser:
     return user
 
 
-def incoming(product_id: str, daily_sales: int, *, is_ad: bool = False) -> TemuIngestProduct:
+def incoming(
+    product_id: str,
+    daily_sales: int,
+    *,
+    is_ad: bool = False,
+    image_url: str | None = "https://img.kwcdn.com/example.jpg",
+) -> TemuIngestProduct:
     return TemuIngestProduct(
         temu_product_id=product_id,
         yunqi_gdid=f"9{product_id}",
         mall_id="100",
         title=f"Temu {product_id}",
         product_url=f"https://www.temu.com/example-g-{product_id}.html",
-        image_url="https://img.kwcdn.com/example.jpg",
+        image_url=image_url,
         sale_price=Decimal("12.86"),
         original_price=Decimal("20"),
         daily_sales=daily_sales,
@@ -95,6 +101,67 @@ def test_temu_batch_duplicate_product_id_uses_last_value():
         assert created.item_count == 1
         product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "602"))
         assert product.daily_sales == 8
+
+
+def test_temu_empty_image_does_not_replace_existing_product_image():
+    with create_session() as db:
+        user = create_user(db, "image-preserve-temu")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        original_url = "https://img.kwcdn.com/original.jpg"
+
+        ingest_temu_batch(
+            db,
+            user,
+            batch(
+                group.id,
+                "temu-image-original",
+                [incoming("605", 5, image_url=original_url)],
+            ),
+        )
+        ingest_temu_batch(
+            db,
+            user,
+            batch(
+                group.id,
+                "temu-image-empty",
+                [incoming("605", 6, image_url=None)],
+            ),
+        )
+
+        product = db.scalar(
+            select(TemuProduct).where(TemuProduct.temu_product_id == "605")
+        )
+        assert product is not None
+        assert product.image_url == original_url
+        assert product.daily_sales == 6
+
+
+def test_temu_valid_image_replaces_existing_product_image():
+    with create_session() as db:
+        user = create_user(db, "image-update-temu")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        updated_url = "https://img.kwcdn.com/updated.jpg"
+
+        ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-image-first", [incoming("606", 5)]),
+        )
+        ingest_temu_batch(
+            db,
+            user,
+            batch(
+                group.id,
+                "temu-image-update",
+                [incoming("606", 6, image_url=updated_url)],
+            ),
+        )
+
+        product = db.scalar(
+            select(TemuProduct).where(TemuProduct.temu_product_id == "606")
+        )
+        assert product is not None
+        assert product.image_url == updated_url
 
 
 def test_temu_list_hides_ads_by_default_and_derives_shop_type():

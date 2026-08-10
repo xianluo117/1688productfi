@@ -205,6 +205,8 @@ def ingest_temu_batch(
             db.flush()
         else:
             for key, value in values.items():
+                if key == "image_url" and value is None and product.image_url:
+                    continue
                 setattr(product, key, value)
 
         membership = db.scalar(select(TemuGroupMembership).where(
