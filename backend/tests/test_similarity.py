@@ -24,6 +24,7 @@ from app.similarity_services import (
     VECTOR_STORAGE_DIMENSION,
     build_embedding_request,
     embedding_endpoint_url,
+    embedding_request_headers,
     merge_products,
     normalize_vector,
     phash_distance,
@@ -124,6 +125,13 @@ def test_embedding_endpoint_accepts_gemini_base_or_full_url():
         "https://proxy.example.com/v1beta/models/gemini-embedding-2:embedContent",
         model,
     ) == "https://proxy.example.com/v1beta/models/gemini-embedding-2:embedContent"
+
+
+def test_embedding_request_headers_support_official_and_proxy_auth():
+    headers = embedding_request_headers("secret-token")
+    assert headers["x-goog-api-key"] == "secret-token"
+    assert headers["Authorization"] == "Bearer secret-token"
+    assert headers["Content-Type"] == "application/json"
 
 
 def test_prepare_embedding_image_converts_transparent_png_to_jpeg():

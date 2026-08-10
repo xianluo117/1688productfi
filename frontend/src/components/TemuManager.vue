@@ -14,6 +14,8 @@ const groups = ref([]);
 const selectedGroupId = ref(null);
 const products = ref([]);
 const detail = ref(null);
+const detailLoading = ref(false);
+const detailError = ref("");
 const total = ref(0);
 const page = ref(1);
 const pageSize = 30;
@@ -160,8 +162,17 @@ function number(value, digits = 2) {
 }
 
 async function showDetail(product) {
-  const owner = isAdmin.value ? `?owner_id=${selectedOwnerId.value}` : "";
-  detail.value = await api(`/api/temu/products/${product.id}${owner}`);
+  detailLoading.value = true;
+  detailError.value = "";
+  try {
+    const owner = isAdmin.value ? `?owner_id=${selectedOwnerId.value}` : "";
+    detail.value = await api(`/api/temu/products/${product.id}${owner}`);
+  } catch (error) {
+    detailError.value = error.message;
+    window.alert(`加载 Temu 商品详情失败：${error.message}`);
+  } finally {
+    detailLoading.value = false;
+  }
 }
 
 watch(page, loadProducts);
@@ -370,7 +381,11 @@ onMounted(loadGroups);
                 }}</span
                 ><span v-if="product.is_ad" class="ad-badge">广告</span>
               </td>
-              <td><button @click="showDetail(product)">详情</button></td>
+              <td>
+                <button :disabled="detailLoading" @click="showDetail(product)">
+                  {{ detailLoading ? "加载中" : "详情" }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -385,52 +400,99 @@ onMounted(loadGroups);
         ><button :disabled="page >= totalPages" @click="page++">下一页</button>
       </div>
 
-      <div v-if="detail" class="modal-backdrop" @click.self="detail = null">
-        <article class="detail-card temu-detail">
-          <button class="modal-close" @click="detail = null">×</button>
-          <h2>{{ detail.title }}</h2>
+      <div v-if="detail" class="drawer-backdrop" @click.self="detail = null">
+        <article class="drawer temu-detail">
+          <button class="close" @click="detail = null">×</button>
+          <div class="temu-detail-header">
+            <img
+              v-if="detail.image_url"
+              :src="detail.image_url"
+              class="temu-detail-image"
+            />
+            <div>
+              <h2>{{ detail.title }}</h2>
+              <a
+                :href="detail.product_url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                打开 Temu 商品 {{ detail.temu_product_id }}
+              </a>
+            </div>
+          </div>
           <div class="detail-grid">
-            <span>日/周/月/总销量</span
-            ><strong
-              >{{ number(detail.daily_sales, 0) }} /
+            <span>售价 / 原价</span>
+            <strong
+              >${{ number(detail.sale_price) }} / ${{
+                number(detail.original_price)
+              }}</strong
+            >
+            <span>日/周/月/总销量</span>
+            <strong>
+              {{ number(detail.daily_sales, 0) }} /
               {{ number(detail.weekly_sales, 0) }} /
               {{ number(detail.monthly_sales, 0) }} /
-              {{ number(detail.total_sales, 0) }}</strong
-            ><span>日/周/月/总销售额</span
-            ><strong
-              >{{ number(detail.daily_revenue) }} /
+              {{ number(detail.total_sales, 0) }}
+            </strong>
+            <span>日/周/月/总销售额</span>
+            <strong>
+              {{ number(detail.daily_revenue) }} /
               {{ number(detail.weekly_revenue) }} /
               {{ number(detail.monthly_revenue) }} /
-              {{ number(detail.total_revenue) }}</strong
-            ><span>店铺</span
-            ><strong
+              {{ number(detail.total_revenue) }}
+            </strong>
+            <span>上架日期 / 天数</span>
+            <strong
+              >{{ detail.listing_date || "-" }} /
+              {{ detail.listed_days ?? "-" }}</strong
+            >
+            <span>店铺</span>
+            <strong
               >{{ detail.shop_name || "-" }} ·
               {{ detail.derived_shop_type || "-" }}</strong
-            ><span>标签</span><strong>{{ detail.temu_tags || "-" }}</strong>
+            >
+            <span>所属分组</span>
+            <strong>{{
+              detail.groups.map((group) => group.name).join("、") || "-"
+            }}</strong>
+            <span>标签</span>
+            <strong>{{ detail.temu_tags || "-" }}</strong>
           </div>
           <h3>个人采集历史</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>日销量</th>
-                <th>周销量</th>
-                <th>总销量</th>
-                <th>售价</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="snapshot in detail.snapshots" :key="snapshot.id">
-                <td>{{ new Date(snapshot.collected_at).toLocaleString() }}</td>
-                <td>{{ snapshot.daily_sales }}</td>
-                <td>{{ snapshot.weekly_sales }}</td>
-                <td>{{ snapshot.total_sales }}</td>
-                <td>{{ snapshot.sale_price }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="table-wrap detail-history-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>日销量</th>
+                  <th>周销量</th>
+                  <th>月销量</th>
+                  <th>总销量</th>
+                  <th>售价</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="snapshot in detail.snapshots" :key="snapshot.id">
+                  <td>
+                    {{
+                      new Date(snapshot.collected_at).toLocaleString("zh-CN")
+                    }}
+                  </td>
+                  <td>{{ number(snapshot.daily_sales, 0) }}</td>
+                  <td>{{ number(snapshot.weekly_sales, 0) }}</td>
+                  <td>{{ number(snapshot.monthly_sales, 0) }}</td>
+                  <td>{{ number(snapshot.total_sales, 0) }}</td>
+                  <td>${{ number(snapshot.sale_price) }}</td>
+                </tr>
+                <tr v-if="!detail.snapshots.length">
+                  <td colspan="6" class="empty">暂无个人采集历史</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </article>
       </div>
+      <p v-if="detailError" class="error">{{ detailError }}</p>
     </section>
   </div>
 </template>

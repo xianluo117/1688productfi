@@ -344,16 +344,24 @@ def _response_error(response: httpx.Response) -> EmbeddingRequestError:
     )
 
 
+def embedding_request_headers(api_key: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        # Official Gemini uses x-goog-api-key. NewAPI-compatible Gemini proxies
+        # commonly validate the same token through Authorization instead.
+        headers["x-goog-api-key"] = api_key
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
 async def request_embedding(
     config: ImageEmbeddingConfig,
     product: Product,
     content: bytes,
     settings: Settings,
 ) -> list[float]:
-    headers = {"Content-Type": "application/json"}
     api_key = decrypt_api_key(config.api_key_encrypted, settings)
-    if api_key:
-        headers["x-goog-api-key"] = api_key
+    headers = embedding_request_headers(api_key)
     try:
         async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
             response = await client.post(

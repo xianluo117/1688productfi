@@ -583,7 +583,32 @@ dd {
   color: #b42318;
 }
 .temu-detail {
-  width: min(1000px, 94vw);
+  width: min(920px, 94vw);
+}
+.temu-detail-header {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+  padding-right: 36px;
+}
+.temu-detail-header h2 {
+  margin-top: 0;
+  white-space: normal;
+}
+.temu-detail-image {
+  width: 140px;
+  height: 140px;
+  object-fit: cover;
+  border-radius: 12px;
+  background: #f2f4f7;
+}
+.detail-history-wrap {
+  margin-top: 12px;
+  max-height: 420px;
+}
+.detail-history-wrap table {
+  min-width: 760px;
 }
 .detail-grid {
   display: grid;
@@ -1109,6 +1134,7 @@ dd {
     padding: 16px 20px;
     flex-wrap: wrap;
   }
+  .temu-detail-header,
   .detail-grid,
   .similarity-stats,
   .ai-config-form,
