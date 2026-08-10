@@ -60,7 +60,7 @@ from .services import (
     snapshot_to_response,
 )
 from .similarity_router import router as similarity_router
-from .similarity_services import enqueue_product
+from .similarity_services import enqueue_product, queue_control
 from .temu_router import router as temu_router
 
 
@@ -367,7 +367,11 @@ async def cache_image_task(product_id: int, image_url: str) -> None:
                 product.image_content_hash = None
                 product.image_phash = None
                 product.similarity_status = "pending"
-            enqueue_product(db, product)
+            control = queue_control(db)
+            if control.auto_vectorization_enabled:
+                enqueue_product(db, product)
+            else:
+                product.similarity_status = "disabled"
             db.commit()
     except Exception:
         logger.exception("Failed to cache image for product %s", product_id)

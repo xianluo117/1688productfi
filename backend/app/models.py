@@ -274,6 +274,7 @@ class SimilarityQueueControl(Base):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     state: Mapped[str] = mapped_column(String(20), default="running")
     concurrency: Mapped[int] = mapped_column(Integer, default=4)
+    auto_vectorization_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

@@ -1,8 +1,9 @@
 <script setup>
-import { onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { api } from "../api";
 
 const emit = defineEmits(["back"]);
+const props = defineProps({ users: { type: Array, default: () => [] } });
 const configs = ref([]);
 const candidates = ref([]);
 const stats = reactive({
@@ -15,28 +16,38 @@ const stats = reactive({
   completed_last_minute: 0,
   queue_state: "running",
   concurrency: 4,
+  auto_vectorization_enabled: true,
 });
+const scopes = ref([]);
+const selectedOwnerId = ref(null);
+const selectedGroupIds = ref([]);
 const failedTasks = ref([]);
 const testing = ref(false);
 const testResult = ref(null);
 const saving = ref(false);
 let refreshTimer;
-const openAiCompatibleTemplate = {
-  model: "{{model}}",
-  input: "{{image_data_url}}",
-  dimensions: 1536,
+const geminiTemplate = {
+  content: {
+    parts: [
+      {
+        inline_data: {
+          mime_type: "image/jpeg",
+          data: "{{image_base64}}",
+        },
+      },
+    ],
+  },
+  output_dimensionality: "{{output_dimension}}",
 };
-const requestTemplateText = ref(
-  JSON.stringify(openAiCompatibleTemplate, null, 2),
-);
+const requestTemplateText = ref(JSON.stringify(geminiTemplate, null, 2));
 const form = reactive({
   id: null,
-  name: "OpenAI 兼容图片向量模型",
-  base_url: "",
+  name: "Gemini 图片向量模型",
+  base_url: "https://generativelanguage.googleapis.com/v1beta",
   api_key: "",
-  model_name: "",
+  model_name: "gemini-embedding-2",
   output_dimension: 1536,
-  response_path: "data.0.embedding",
+  response_path: "embedding.values",
   timeout_seconds: 60,
   top_k: 100,
   phash_auto_distance: 4,
@@ -46,6 +57,27 @@ const form = reactive({
   activate: true,
 });
 
+const selectedScopeGroups = computed(() =>
+  scopes.value.filter((group) => selectedGroupIds.value.includes(group.id)),
+);
+const selectedReadyCount = computed(() =>
+  selectedScopeGroups.value.reduce(
+    (total, group) => total + group.ready_product_count,
+    0,
+  ),
+);
+
+async function loadScopes() {
+  selectedGroupIds.value = [];
+  if (!selectedOwnerId.value) {
+    scopes.value = [];
+    return;
+  }
+  scopes.value = await api(
+    `/api/similarity/admin/scopes?owner_id=${selectedOwnerId.value}`,
+  );
+}
+
 async function load() {
   [configs.value, candidates.value, failedTasks.value] = await Promise.all([
     api("/api/similarity/admin/configs"),
@@ -54,6 +86,9 @@ async function load() {
   ]);
   Object.assign(stats, await api("/api/similarity/admin/stats"));
   if (!form.id && configs.value.length) selectConfig(configs.value[0]);
+  if (!selectedOwnerId.value && props.users.length) {
+    selectedOwnerId.value = props.users[0].id;
+  }
 }
 
 function selectConfig(config) {
@@ -65,20 +100,20 @@ function selectConfig(config) {
   requestTemplateText.value = JSON.stringify(config.request_template, null, 2);
 }
 
-function useOpenAiPreset() {
-  requestTemplateText.value = JSON.stringify(openAiCompatibleTemplate, null, 2);
-  form.response_path = "data.0.embedding";
+function useGeminiPreset() {
+  requestTemplateText.value = JSON.stringify(geminiTemplate, null, 2);
+  form.response_path = "embedding.values";
 }
 
 function createNew() {
   Object.assign(form, {
     id: null,
-    name: "OpenAI 兼容图片向量模型",
-    base_url: "",
+    name: "Gemini 图片向量模型",
+    base_url: "https://generativelanguage.googleapis.com/v1beta",
     api_key: "",
-    model_name: "",
+    model_name: "gemini-embedding-2",
     output_dimension: 1536,
-    response_path: "data.0.embedding",
+    response_path: "embedding.values",
     timeout_seconds: 60,
     top_k: 100,
     phash_auto_distance: 4,
@@ -87,7 +122,7 @@ function createNew() {
     auto_merge_enabled: false,
     activate: true,
   });
-  useOpenAiPreset();
+  useGeminiPreset();
 }
 
 async function saveConfig() {
@@ -109,6 +144,8 @@ async function saveConfig() {
         ...form,
         request_template: requestTemplate,
         api_key: form.api_key || null,
+        owner_id: selectedOwnerId.value,
+        group_ids: selectedGroupIds.value,
       }),
     });
     createNew();
@@ -118,12 +155,15 @@ async function saveConfig() {
   }
 }
 
-async function setConcurrency() {
+async function saveQueueSettings() {
   Object.assign(
     stats,
     await api("/api/similarity/admin/queue", {
       method: "PUT",
-      body: JSON.stringify({ concurrency: stats.concurrency }),
+      body: JSON.stringify({
+        concurrency: stats.concurrency,
+        auto_vectorization_enabled: stats.auto_vectorization_enabled,
+      }),
     }),
   );
 }
@@ -155,7 +195,22 @@ async function retryTask(taskId) {
 }
 
 async function retryAllFailed() {
+  if (
+    !window.confirm(`确认重新处理全部 ${failedTasks.value.length} 个失败任务？`)
+  )
+    return;
   await api("/api/similarity/admin/tasks/retry-failed", { method: "POST" });
+  await load();
+}
+
+async function clearFailedTasks() {
+  if (
+    !window.confirm(
+      `确认清空全部 ${failedTasks.value.length} 条失败记录？此操作不会删除商品。`,
+    )
+  )
+    return;
+  await api("/api/similarity/admin/tasks/failed", { method: "DELETE" });
   await load();
 }
 
@@ -175,8 +230,20 @@ async function testConfig(config) {
 }
 
 async function rebuild(config) {
+  if (!selectedOwnerId.value || !selectedGroupIds.value.length)
+    return window.alert("请先选择用户和至少一个 1688 分组");
+  if (
+    !window.confirm(
+      `确认只清除并重建所选 ${selectedGroupIds.value.length} 个分组中的向量？可处理商品约 ${selectedReadyCount.value} 个，跨分组商品会自动去重。`,
+    )
+  )
+    return;
   await api(`/api/similarity/admin/configs/${config.id}/rebuild`, {
     method: "POST",
+    body: JSON.stringify({
+      owner_id: selectedOwnerId.value,
+      group_ids: selectedGroupIds.value,
+    }),
   });
   await load();
 }
@@ -193,6 +260,8 @@ function formatScore(value) {
   return value === null || value === undefined ? "-" : Number(value).toFixed(4);
 }
 
+watch(selectedOwnerId, loadScopes);
+
 onMounted(async () => {
   await load();
   refreshTimer = window.setInterval(load, 5000);
@@ -205,8 +274,8 @@ onUnmounted(() => window.clearInterval(refreshTimer));
   <section class="content similarity-admin">
     <header>
       <div>
-        <h2>AI 同款识别</h2>
-        <span>管理员保存 OpenAI 兼容图片向量接口、API Key 与审核规则</span>
+        <h2>相似度检索</h2>
+        <span>配置 Gemini 图片向量、运行范围、任务队列与候选审核</span>
       </div>
       <button class="secondary" @click="emit('back')">返回商品</button>
     </header>
@@ -218,6 +287,12 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           >安全暂停不会领取新任务；停止只取消等待任务，在途任务自然完成。</span
         >
       </div>
+      <label class="switch-field"
+        ><input
+          v-model="stats.auto_vectorization_enabled"
+          type="checkbox"
+        />新采集图片自动向量化</label
+      >
       <label
         >并发数<input
           v-model.number="stats.concurrency"
@@ -225,7 +300,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           min="1"
           max="32"
       /></label>
-      <button @click="setConcurrency">保存并发</button>
+      <button @click="saveQueueSettings">保存处理设置</button>
       <button class="secondary" @click="controlQueue('pause')">暂停</button>
       <button @click="controlQueue('resume')">继续</button>
       <button class="danger" @click="controlQueue('stop')">
@@ -264,6 +339,41 @@ onUnmounted(() => window.clearInterval(refreshTimer));
       </div>
     </div>
 
+    <section class="review-panel scope-panel">
+      <div class="section-heading">
+        <div>
+          <h3>向量化运行范围</h3>
+          <span>先选择用户，再选择一个或多个 1688 分组</span>
+        </div>
+      </div>
+      <label class="owner-select"
+        >用户
+        <select v-model="selectedOwnerId">
+          <option v-for="user in users" :key="user.id" :value="user.id">
+            {{ user.username }}
+          </option>
+        </select>
+      </label>
+      <div class="scope-group-list">
+        <label v-for="group in scopes" :key="group.id" class="scope-group-item">
+          <input v-model="selectedGroupIds" type="checkbox" :value="group.id" />
+          <span>
+            <strong>{{ group.name }}</strong>
+            <small>
+              共 {{ group.product_count }} 个，图片就绪
+              {{ group.ready_product_count }} 个
+            </small>
+          </span>
+        </label>
+        <p v-if="!scopes.length" class="empty">该用户暂无 1688 分组</p>
+      </div>
+      <p class="form-help">
+        当前选择 {{ selectedGroupIds.length }} 个分组，预计可处理
+        {{ selectedReadyCount }}
+        个分组成员；同一商品存在于多个分组时后端只处理一次。
+      </p>
+    </section>
+
     <section class="settings-panel">
       <div class="settings-list">
         <div class="section-heading">
@@ -289,7 +399,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
 
       <form class="ai-config-form" @submit.prevent="saveConfig">
         <p class="wide form-help">
-          服务类型固定为 OpenAI 兼容格式。模型 URL、API Key
+          服务使用 Gemini embedContent 图片向量格式。模型 URL、API Key
           和模型名称均在此处保存，无需在 .env 中填写 AI_SECRET_KEY。
         </p>
         <label>配置名称<input v-model="form.name" required /></label>
@@ -297,12 +407,13 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           >自定义 Base URL<input
             v-model="form.base_url"
             type="url"
-            placeholder="https://newapi.momoaisite.com/v1"
+            placeholder="https://generativelanguage.googleapis.com/v1beta"
             required
         /></label>
         <p class="wide form-help">
-          可填写 Base URL（例如 https://newapi.momoaisite.com/v1）或完整的
-          /embeddings 地址；填写 Base URL 时后端自动追加 /embeddings。
+          可填写 Gemini Base URL、自定义代理 Base URL 或完整的
+          models/gemini-embedding-2:embedContent 地址。填写 Base URL
+          时，后端自动追加模型与 :embedContent。
         </p>
         <label
           >第三方 API Key<input
@@ -367,8 +478,8 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           />
         </label>
         <div class="wide config-actions">
-          <button type="button" class="secondary" @click="useOpenAiPreset">
-            恢复 OpenAI 兼容模板
+          <button type="button" class="secondary" @click="useGeminiPreset">
+            恢复 Gemini 图片模板
           </button>
         </div>
         <label class="switch-field"
@@ -383,6 +494,9 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             type="checkbox"
           />保存后设为当前模型</label
         >
+        <p class="wide form-help">
+          保存并启用新模型时，仅当已选择运行分组才会清理这些商品的旧任务、候选和向量并重新排队；未选分组不会被处理。
+        </p>
         <div class="wide config-actions">
           <button :disabled="saving">
             {{ saving ? "保存中..." : "保存配置" }}
@@ -393,7 +507,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             class="secondary"
             @click="rebuild(form)"
           >
-            重新排队
+            清除并重建所选分组
           </button>
           <button
             v-if="form.id"
@@ -406,9 +520,9 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           </button>
         </div>
         <p class="wide form-help">
-          默认请求为 model + input，响应向量读取
-          data.0.embedding。第三方接口格式不同时，可修改 JSON
-          模板和响应路径。模板占位符：model、image_data_url、image_base64、image_url、product_id，使用双大括号包裹。
+          默认请求使用 content.parts.inline_data 传输 JPEG 图片，响应向量读取
+          embedding.values。自定义代理字段不同时，可修改 JSON
+          模板和响应路径。模板占位符：model、output_dimension、image_base64、image_data_url、image_url、product_id，使用双大括号包裹。
         </p>
         <p
           v-if="testResult"
@@ -423,9 +537,10 @@ onUnmounted(() => window.clearInterval(refreshTimer));
     <section class="review-panel failure-panel">
       <div class="section-heading">
         <h3>失败任务明细</h3>
-        <button v-if="failedTasks.length" @click="retryAllFailed">
-          全部失败重试
-        </button>
+        <div v-if="failedTasks.length" class="section-heading-actions">
+          <button @click="retryAllFailed">全部失败重试</button>
+          <button class="danger" @click="clearFailedTasks">清空失败记录</button>
+        </div>
       </div>
       <div v-if="!failedTasks.length" class="empty review-empty">
         暂无失败任务

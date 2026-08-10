@@ -142,7 +142,7 @@ class ImageEmbeddingConfigUpsert(BaseModel):
     model_name: str = Field(min_length=1, max_length=255)
     output_dimension: int = Field(gt=0, le=1536)
     request_template: dict
-    response_path: str = Field(default="data.0.embedding", min_length=1, max_length=255)
+    response_path: str = Field(default="embedding.values", min_length=1, max_length=255)
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     top_k: int = Field(default=100, ge=1, le=500)
     phash_auto_distance: int = Field(default=4, ge=0, le=64)
@@ -150,6 +150,15 @@ class ImageEmbeddingConfigUpsert(BaseModel):
     auto_merge_threshold: float = Field(default=0.94, ge=-1, le=1)
     auto_merge_enabled: bool = False
     activate: bool = True
+    owner_id: int | None = Field(default=None, gt=0)
+    group_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("group_ids")
+    @classmethod
+    def unique_scope_group_ids(cls, value: list[int]) -> list[int]:
+        if any(group_id <= 0 for group_id in value):
+            raise ValueError("group IDs must be positive")
+        return list(dict.fromkeys(value))
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "ImageEmbeddingConfigUpsert":
@@ -235,6 +244,27 @@ class SimilarityClusterResponse(BaseModel):
 
 class SimilarityQueueUpdate(BaseModel):
     concurrency: int = Field(ge=1, le=32)
+    auto_vectorization_enabled: bool
+
+
+class SimilarityScopeRequest(BaseModel):
+    owner_id: int = Field(gt=0)
+    group_ids: list[int] = Field(min_length=1)
+
+    @field_validator("group_ids")
+    @classmethod
+    def unique_group_ids(cls, value: list[int]) -> list[int]:
+        if any(group_id <= 0 for group_id in value):
+            raise ValueError("group IDs must be positive")
+        return list(dict.fromkeys(value))
+
+
+class SimilarityScopeGroupResponse(BaseModel):
+    id: int
+    owner_id: int
+    name: str
+    product_count: int
+    ready_product_count: int
 
 
 class SimilarityTaskResponse(BaseModel):
@@ -272,6 +302,7 @@ class SimilarityTaskStatsResponse(BaseModel):
     completed_last_minute: int = 0
     queue_state: Literal["running", "paused", "stopped"] = "running"
     concurrency: int = 4
+    auto_vectorization_enabled: bool = True
 
 
 class ProductPage(BaseModel):

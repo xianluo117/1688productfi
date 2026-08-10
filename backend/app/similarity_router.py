@@ -5,7 +5,7 @@ from time import perf_counter
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from .auth import get_current_user, require_admin
@@ -15,6 +15,8 @@ from .models import (
     AdminUser,
     ImageEmbeddingConfig,
     Product,
+    ProductGroup,
+    ProductGroupMembership,
     ProductSimilarityCandidate,
     ProductSimilarityCluster,
     ProductSimilarityClusterMember,
@@ -30,6 +32,8 @@ from .schemas import (
     SimilarityDecisionRequest,
     SimilarityProductResponse,
     SimilarityQueueUpdate,
+    SimilarityScopeGroupResponse,
+    SimilarityScopeRequest,
     SimilaritySourceResponse,
     SimilarityTaskResponse,
     SimilarityTaskStatsResponse,
@@ -39,7 +43,6 @@ from .similarity_services import (
     decrypt_api_key,
     embedding_endpoint_url,
     encrypt_api_key,
-    enqueue_all_products,
     image_fingerprints,
     mask_api_key,
     merge_products,
@@ -47,6 +50,8 @@ from .similarity_services import (
     queue_control,
     recalculate_cluster_representative,
     request_embedding,
+    reset_embedding_scope,
+    scope_product_ids,
     task_stats,
 )
 
@@ -123,7 +128,17 @@ def create_config(
     db.add(config)
     db.flush()
     if config.is_active:
-        enqueue_all_products(db, config)
+        if payload.owner_id is None or not payload.group_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="启用模型时必须选择用户和至少一个 1688 分组",
+            )
+        try:
+            product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        reset_embedding_scope(db, config, product_ids, clear_all_configs=True)
+        queue_control(db).state = "running"
     db.commit()
     db.refresh(config)
     return config_response(config)
@@ -157,6 +172,18 @@ def update_config(
     current.auto_merge_threshold = payload.auto_merge_threshold
     current.auto_merge_enabled = payload.auto_merge_enabled
     if payload.activate:
+        if not current.is_active:
+            if payload.owner_id is None or not payload.group_ids:
+                raise HTTPException(
+                    status_code=422,
+                    detail="启用模型时必须选择用户和至少一个 1688 分组",
+                )
+            try:
+                product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            reset_embedding_scope(db, current, product_ids, clear_all_configs=True)
+            queue_control(db).state = "running"
         db.execute(update(ImageEmbeddingConfig).where(ImageEmbeddingConfig.id != current.id).values(is_active=False))
         current.is_active = True
     db.commit()
@@ -167,18 +194,19 @@ def update_config(
 @router.post("/admin/configs/{config_id}/rebuild", response_model=SimilarityTaskStatsResponse)
 def rebuild_config(
     config_id: int,
+    payload: SimilarityScopeRequest,
     _: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> SimilarityTaskStatsResponse:
     config = db.get(ImageEmbeddingConfig, config_id)
     if not config:
         raise HTTPException(status_code=404, detail="模型配置不存在")
-    db.execute(
-        update(SimilarityTask)
-        .where(SimilarityTask.config_id == config.id, SimilarityTask.status == "failed")
-        .values(status="pending", attempts=0, last_error=None, available_at=datetime.now(timezone.utc))
-    )
-    enqueue_all_products(db, config, force=True)
+    try:
+        product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    reset_embedding_scope(db, config, product_ids)
+    queue_control(db).state = "running"
     db.commit()
     return SimilarityTaskStatsResponse(**task_stats(db))
 
@@ -208,6 +236,46 @@ def stats(
     return SimilarityTaskStatsResponse(**task_stats(db))
 
 
+@router.get("/admin/scopes", response_model=list[SimilarityScopeGroupResponse])
+def list_scopes(
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    owner_id: int = Query(gt=0),
+) -> list[SimilarityScopeGroupResponse]:
+    rows = db.execute(
+        select(
+            ProductGroup.id,
+            ProductGroup.owner_id,
+            ProductGroup.name,
+            func.count(func.distinct(ProductGroupMembership.product_id)),
+            func.count(
+                func.distinct(ProductGroupMembership.product_id)
+            ).filter(
+                Product.cached_image_name.is_not(None),
+                Product.image_status == "ready",
+            ),
+        )
+        .outerjoin(
+            ProductGroupMembership,
+            ProductGroupMembership.group_id == ProductGroup.id,
+        )
+        .outerjoin(Product, Product.id == ProductGroupMembership.product_id)
+        .where(ProductGroup.owner_id == owner_id)
+        .group_by(ProductGroup.id, ProductGroup.owner_id, ProductGroup.name)
+        .order_by(ProductGroup.name.asc())
+    ).all()
+    return [
+        SimilarityScopeGroupResponse(
+            id=group_id,
+            owner_id=row_owner_id,
+            name=name,
+            product_count=int(product_count),
+            ready_product_count=int(ready_product_count),
+        )
+        for group_id, row_owner_id, name, product_count, ready_product_count in rows
+    ]
+
+
 @router.put("/admin/queue", response_model=SimilarityTaskStatsResponse)
 def update_queue(
     payload: SimilarityQueueUpdate,
@@ -216,6 +284,7 @@ def update_queue(
 ) -> SimilarityTaskStatsResponse:
     control = queue_control(db)
     control.concurrency = payload.concurrency
+    control.auto_vectorization_enabled = payload.auto_vectorization_enabled
     db.commit()
     return SimilarityTaskStatsResponse(**task_stats(db))
 
@@ -295,6 +364,16 @@ def retry_failed_tasks(
     return SimilarityTaskStatsResponse(**task_stats(db))
 
 
+@router.delete("/admin/tasks/failed", response_model=SimilarityTaskStatsResponse)
+def clear_failed_tasks(
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityTaskStatsResponse:
+    db.execute(delete(SimilarityTask).where(SimilarityTask.status == "failed"))
+    db.commit()
+    return SimilarityTaskStatsResponse(**task_stats(db))
+
+
 @router.post("/admin/configs/{config_id}/test", response_model=SimilarityConnectionTestResponse)
 async def test_config(
     config_id: int,
@@ -323,7 +402,7 @@ async def test_config(
         success=True,
         product_id=product.id,
         offer_id=product.offer_id,
-        endpoint=embedding_endpoint_url(config.base_url),
+        endpoint=embedding_endpoint_url(config.base_url, config.model_name),
         returned_dimension=config.output_dimension,
         elapsed_ms=elapsed_ms,
         message=f"接口正常，返回 {config.output_dimension} 维向量（存储长度 {len(vector)}）",

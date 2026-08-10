@@ -13,7 +13,7 @@ import httpx
 import imagehash
 from cryptography.fernet import Fernet
 from PIL import Image
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -101,9 +101,44 @@ def enqueue_product(db: Session, product: Product, config: ImageEmbeddingConfig 
     return task
 
 
-def enqueue_all_products(db: Session, config: ImageEmbeddingConfig, force: bool = False) -> int:
+def scope_product_ids(db: Session, owner_id: int, group_ids: list[int]) -> list[int]:
+    """返回指定用户和 1688 分组范围内去重后的商品 ID。"""
+    if not group_ids:
+        raise ValueError("至少选择一个 1688 分组")
+    valid_group_count = db.scalar(
+        select(func.count(ProductGroup.id)).where(
+            ProductGroup.owner_id == owner_id,
+            ProductGroup.id.in_(group_ids),
+        )
+    )
+    if valid_group_count != len(set(group_ids)):
+        raise ValueError("所选 1688 分组不存在或不属于指定用户")
+    return list(
+        db.scalars(
+            select(ProductGroupMembership.product_id)
+            .where(
+                ProductGroupMembership.owner_id == owner_id,
+                ProductGroupMembership.group_id.in_(group_ids),
+            )
+            .distinct()
+        )
+    )
+
+
+def enqueue_scope_products(
+    db: Session,
+    config: ImageEmbeddingConfig,
+    product_ids: list[int],
+    force: bool = False,
+) -> int:
+    if not product_ids:
+        return 0
     products = db.scalars(
-        select(Product).where(Product.cached_image_name.is_not(None), Product.image_status == "ready")
+        select(Product).where(
+            Product.id.in_(product_ids),
+            Product.cached_image_name.is_not(None),
+            Product.image_status == "ready",
+        )
     ).all()
     count = 0
     for product in products:
@@ -120,6 +155,63 @@ def enqueue_all_products(db: Session, config: ImageEmbeddingConfig, force: bool 
             product.similarity_status = "pending"
         count += 1
     return count
+
+
+def reset_embedding_scope(
+    db: Session,
+    config: ImageEmbeddingConfig,
+    product_ids: list[int],
+    clear_all_configs: bool = False,
+) -> int:
+    """只清除选中商品的向量结果，并按指定模型重新排队。"""
+    if not product_ids:
+        return 0
+    cluster_ids = list(
+        db.scalars(
+            select(ProductSimilarityClusterMember.cluster_id)
+            .where(ProductSimilarityClusterMember.product_id.in_(product_ids))
+            .distinct()
+        )
+    )
+    if cluster_ids:
+        affected_product_ids = list(
+            db.scalars(
+                select(ProductSimilarityClusterMember.product_id)
+                .where(ProductSimilarityClusterMember.cluster_id.in_(cluster_ids))
+                .distinct()
+            )
+        )
+        db.execute(
+            delete(ProductSimilarityClusterMember).where(
+                ProductSimilarityClusterMember.cluster_id.in_(cluster_ids)
+            )
+        )
+        db.execute(
+            delete(ProductSimilarityCluster).where(
+                ProductSimilarityCluster.id.in_(cluster_ids)
+            )
+        )
+        if affected_product_ids:
+            db.execute(
+                update(Product)
+                .where(Product.id.in_(affected_product_ids))
+                .values(similarity_status="pending")
+            )
+    candidate_filter = (
+        (ProductSimilarityCandidate.left_product_id.in_(product_ids))
+        | (ProductSimilarityCandidate.right_product_id.in_(product_ids))
+    )
+    task_filter = SimilarityTask.product_id.in_(product_ids)
+    embedding_filter = ProductImageEmbedding.product_id.in_(product_ids)
+    if not clear_all_configs:
+        candidate_filter &= ProductSimilarityCandidate.config_id == config.id
+        task_filter &= SimilarityTask.config_id == config.id
+        embedding_filter &= ProductImageEmbedding.config_id == config.id
+    db.execute(delete(ProductSimilarityCandidate).where(candidate_filter))
+    db.execute(delete(SimilarityTask).where(task_filter))
+    db.execute(delete(ProductImageEmbedding).where(embedding_filter))
+    db.flush()
+    return enqueue_scope_products(db, config, product_ids)
 
 
 def prepare_embedding_image(content: bytes) -> bytes:
@@ -170,6 +262,7 @@ def build_embedding_request(config: ImageEmbeddingConfig, product: Product, cont
     image_base64 = base64.b64encode(content).decode("ascii")
     replacements = {
         "{{model}}": config.model_name,
+        "{{output_dimension}}": config.output_dimension,
         "{{image_base64}}": image_base64,
         "{{image_data_url}}": f"data:image/jpeg;base64,{image_base64}",
         "{{image_url}}": product.original_image_url or "",
@@ -199,10 +292,9 @@ def normalize_vector(raw: Any, expected_dimension: int) -> list[float]:
     if expected_dimension > VECTOR_STORAGE_DIMENSION:
         raise ValueError(f"configured embedding dimension exceeds storage limit {VECTOR_STORAGE_DIMENSION}")
 
-    # Gemini embedding models use Matryoshka Representation Learning. Some
-    # OpenAI-compatible gateways ignore `dimensions` and return the default
-    # 3072 values, so retaining the requested prefix is equivalent to asking
-    # the upstream model for that smaller output dimension.
+    # Gemini embedding models use Matryoshka Representation Learning. Retaining
+    # the requested prefix also tolerates compatible gateways that ignore
+    # output_dimensionality and return the model's default 3072 values.
     vector = vector[:expected_dimension]
     norm = math.sqrt(sum(value * value for value in vector))
     if not norm:
@@ -211,11 +303,17 @@ def normalize_vector(raw: Any, expected_dimension: int) -> list[float]:
     return normalized + [0.0] * (VECTOR_STORAGE_DIMENSION - len(normalized))
 
 
-def embedding_endpoint_url(base_url: str) -> str:
+def embedding_endpoint_url(base_url: str, model_name: str) -> str:
     cleaned = base_url.rstrip("/")
-    if cleaned.endswith("/embeddings"):
+    if cleaned.endswith(":embedContent"):
         return cleaned
-    return f"{cleaned}/embeddings"
+    if "/models/" in cleaned:
+        return f"{cleaned}:embedContent"
+    if cleaned.endswith("/models"):
+        return f"{cleaned}/{model_name}:embedContent"
+    if not cleaned.endswith(("/v1", "/v1beta")):
+        cleaned = f"{cleaned}/v1beta"
+    return f"{cleaned}/models/{model_name}:embedContent"
 
 
 class EmbeddingRequestError(RuntimeError):
@@ -238,11 +336,11 @@ async def request_embedding(
     headers = {"Content-Type": "application/json"}
     api_key = decrypt_api_key(config.api_key_encrypted, settings)
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        headers["x-goog-api-key"] = api_key
     try:
         async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
             response = await client.post(
-                embedding_endpoint_url(config.base_url),
+                embedding_endpoint_url(config.base_url, config.model_name),
                 headers=headers,
                 json=build_embedding_request(config, product, content),
             )
@@ -467,7 +565,12 @@ def generate_candidates(
 def queue_control(db: Session, create: bool = True) -> SimilarityQueueControl | None:
     control = db.get(SimilarityQueueControl, 1)
     if control is None and create:
-        control = SimilarityQueueControl(id=1, state="running", concurrency=4)
+        control = SimilarityQueueControl(
+            id=1,
+            state="running",
+            concurrency=4,
+            auto_vectorization_enabled=True,
+        )
         db.add(control)
         db.commit()
         db.refresh(control)
@@ -521,6 +624,7 @@ def task_stats(db: Session) -> dict[str, Any]:
     control = queue_control(db)
     result["queue_state"] = control.state
     result["concurrency"] = control.concurrency
+    result["auto_vectorization_enabled"] = control.auto_vectorization_enabled
     return result
 
 

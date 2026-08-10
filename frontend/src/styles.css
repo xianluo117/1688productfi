@@ -658,6 +658,61 @@ dd {
   width: 110px;
 }
 
+.queue-panel .switch-field {
+  display: flex;
+  align-items: center;
+  width: auto;
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.scope-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.scope-panel .owner-select {
+  max-width: 360px;
+}
+
+.scope-group-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.scope-group-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid #d0d5dd;
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.scope-group-item span {
+  display: grid;
+  gap: 4px;
+}
+
+.scope-group-item small {
+  color: #667085;
+}
+
+.console-content {
+  min-height: 100vh;
+  padding: 32px;
+}
+
+.console-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .similarity-stats {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -710,6 +765,13 @@ dd {
 
 .section-heading h3 {
   margin: 0;
+}
+
+.section-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .config-item {
