@@ -25,6 +25,7 @@ from app.similarity_services import (
     build_embedding_request,
     embedding_endpoint_url,
     embedding_request_headers,
+    extract_embedding_values,
     merge_products,
     normalize_vector,
     phash_distance,
@@ -106,6 +107,21 @@ def test_apply_candidate_reject_creates_manual_audit_record():
         assert candidate.reviewed_by == admin.id
         assert audit.action == "reject"
         assert audit.candidate_id == candidate.id
+
+
+def test_legacy_openai_response_path_falls_back_to_gemini_values():
+    payload = {"embedding": {"values": [3, 4]}}
+    assert extract_embedding_values(payload, "data.0.embedding") == [3, 4]
+
+
+def test_configured_custom_response_path_remains_strict():
+    payload = {"embedding": {"values": [3, 4]}}
+    try:
+        extract_embedding_values(payload, "custom.vector")
+    except KeyError as error:
+        assert error.args == ("custom",)
+    else:
+        raise AssertionError("custom response path unexpectedly used Gemini fallback")
 
 
 def test_normalize_vector_pads_fixed_storage_dimension():

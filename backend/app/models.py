@@ -239,7 +239,7 @@ class ImageEmbeddingConfig(Base):
     model_name: Mapped[str] = mapped_column(String(255))
     output_dimension: Mapped[int] = mapped_column(Integer)
     request_template: Mapped[dict] = mapped_column(JSON)
-    response_path: Mapped[str] = mapped_column(String(255), default="data.0.embedding")
+    response_path: Mapped[str] = mapped_column(String(255), default="embedding.values")
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=60)
     top_k: Mapped[int] = mapped_column(Integer, default=100)
     phash_auto_distance: Mapped[int] = mapped_column(Integer, default=4)

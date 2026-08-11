@@ -306,6 +306,15 @@ def extract_response_path(payload: Any, path: str) -> Any:
     return current
 
 
+def extract_embedding_values(payload: Any, configured_path: str) -> Any:
+    try:
+        return extract_response_path(payload, configured_path)
+    except (KeyError, IndexError, TypeError, ValueError):
+        if configured_path == "data.0.embedding" and isinstance(payload, dict):
+            return extract_response_path(payload, "embedding.values")
+        raise
+
+
 def normalize_vector(raw: Any, expected_dimension: int) -> list[float]:
     if not isinstance(raw, list) or not raw:
         raise ValueError("embedding response is not a non-empty list")
@@ -386,7 +395,7 @@ async def request_embedding(
     except ValueError as error:
         raise EmbeddingRequestError(f"embedding API returned invalid JSON: {response.text[:1000]}") from error
     try:
-        raw = extract_response_path(payload, config.response_path)
+        raw = extract_embedding_values(payload, config.response_path)
         return normalize_vector(raw, config.output_dimension)
     except (KeyError, IndexError, TypeError, ValueError) as error:
         raise EmbeddingRequestError(
