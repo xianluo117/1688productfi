@@ -1,9 +1,9 @@
+import hashlib
 import ipaddress
 import mimetypes
 import socket
-import hashlib
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -16,6 +16,14 @@ ALLOWED_IMAGE_TYPES = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+
+
+def normalize_temu_image_url(url: str) -> str:
+    """返回适合长期缓存的 Temu 原图 URL。"""
+    parsed = urlparse(url.strip())
+    if parsed.hostname and parsed.hostname.lower().endswith("kwcdn.com"):
+        return urlunparse(parsed._replace(query="", fragment=""))
+    return urlunparse(parsed._replace(fragment=""))
 
 
 def validate_public_image_url(url: str) -> None:

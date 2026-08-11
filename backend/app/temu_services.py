@@ -8,6 +8,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .image_cache import normalize_temu_image_url
 from .models import (
     AdminUser,
     TemuCollectionBatch,
@@ -174,12 +175,17 @@ def ingest_temu_batch(
         product = db.scalar(select(TemuProduct).where(
             TemuProduct.temu_product_id == incoming.temu_product_id
         ))
+        normalized_image_url = (
+            normalize_temu_image_url(str(incoming.image_url))
+            if incoming.image_url
+            else None
+        )
         values = {
             "yunqi_gdid": incoming.yunqi_gdid,
             "mall_id": incoming.mall_id,
             "title": incoming.title,
             "product_url": str(incoming.product_url),
-            "image_url": str(incoming.image_url) if incoming.image_url else None,
+            "image_url": normalized_image_url,
             "sale_price": incoming.sale_price,
             "original_price": incoming.original_price,
             "daily_sales": incoming.daily_sales,
@@ -217,7 +223,7 @@ def ingest_temu_batch(
                 if key == "image_url" and value is None and product.image_url:
                     continue
                 setattr(product, key, value)
-        current_image_url = str(incoming.image_url) if incoming.image_url else previous_image_url
+        current_image_url = normalized_image_url or previous_image_url
         if current_image_url and (current_image_url != previous_image_url or not product.cached_image_name):
             product.image_status = "pending"
             product.image_content_hash = None

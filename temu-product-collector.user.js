@@ -290,6 +290,23 @@
     return normalized;
   }
 
+  function canonicalizeImageUrl(value) {
+    const normalized = normalizeUrl(value);
+    if (!normalized) {
+      return "";
+    }
+    try {
+      const url = new URL(normalized);
+      if (url.hostname.toLowerCase().endsWith("kwcdn.com")) {
+        url.search = "";
+      }
+      url.hash = "";
+      return url.href;
+    } catch (_error) {
+      return normalized;
+    }
+  }
+
   function firstText(root, selectors) {
     for (const selector of selectors) {
       const element = root?.querySelector?.(selector);
@@ -322,7 +339,7 @@
   }
 
   function extractNativeImageUrl(card) {
-    const mainImageUrl = normalizeUrl(
+    const mainImageUrl = canonicalizeImageUrl(
       firstAttribute(
         card,
         ['img[data-js-main-img="true"]'],
@@ -333,14 +350,14 @@
       return mainImageUrl;
     }
 
-    const videoPosterUrl = normalizeUrl(
+    const videoPosterUrl = canonicalizeImageUrl(
       firstAttribute(card, ["video[poster]"], ["poster"]),
     );
     if (videoPosterUrl) {
       return videoPosterUrl;
     }
 
-    return normalizeUrl(
+    return canonicalizeImageUrl(
       firstAttribute(
         card,
         ["img[data-cui-image]", ".goods-img-external img", "img"],

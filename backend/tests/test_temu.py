@@ -5,6 +5,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
+from app.image_cache import normalize_temu_image_url
 from app.models import AdminUser, TemuProduct, TemuProductSnapshot
 from app.schemas import TemuIngestBatchRequest, TemuIngestProduct
 from app.temu_services import (
@@ -71,6 +72,18 @@ def batch(group_id: int, key: str, products: list[TemuIngestProduct]) -> TemuIng
     )
 
 
+def test_normalize_temu_kwcdn_image_url_removes_transform_query():
+    assert normalize_temu_image_url(
+        "https://img.kwcdn.com/product/fancy/example.jpg?imageView2/2/w/500/q/70/format/avif"
+    ) == "https://img.kwcdn.com/product/fancy/example.jpg"
+
+
+def test_normalize_non_kwcdn_image_url_preserves_query():
+    assert normalize_temu_image_url(
+        "https://cdn.example.com/example.jpg?token=abc#preview"
+    ) == "https://cdn.example.com/example.jpg?token=abc"
+
+
 def test_temu_current_values_are_global_but_snapshots_are_owned():
     with create_session() as db:
         first = create_user(db, "first-temu")
@@ -86,6 +99,27 @@ def test_temu_current_values_are_global_but_snapshots_are_owned():
         assert product.daily_sales == 29
         snapshots = list(db.scalars(select(TemuProductSnapshot).where(TemuProductSnapshot.product_id == product.id)))
         assert {snapshot.owner_id for snapshot in snapshots} == {first.id, second.id}
+
+
+def test_temu_ingest_stores_original_kwcdn_image_url():
+    with create_session() as db:
+        user = create_user(db, "original-image-temu")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        transformed_url = (
+            "https://img.kwcdn.com/product/fancy/example.jpg"
+            "?imageView2/2/w/500/q/70/format/avif"
+        )
+
+        _, _, images = ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-original-image", [incoming("600", 1, image_url=transformed_url)]),
+        )
+
+        product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "600"))
+        assert product is not None
+        assert product.image_url == "https://img.kwcdn.com/product/fancy/example.jpg"
+        assert images == [(product.id, product.image_url)]
 
 
 def test_temu_batch_duplicate_product_id_uses_last_value():

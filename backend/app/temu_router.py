@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 from .auth import get_current_user, get_ingest_user
 from .config import get_settings
 from .database import SessionLocal, get_db
-from .image_cache import cache_product_image
+from .image_cache import cache_product_image, normalize_temu_image_url
 from .models import (
     AdminUser,
     CrossPlatformProductRelation,
@@ -47,6 +48,7 @@ from .similarity_services import enqueue_temu_product, queue_control
 
 router = APIRouter(prefix="/api/temu", tags=["temu"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def resolve_owner_id(current_user: AdminUser, requested_owner_id: int | None) -> int:
@@ -153,13 +155,20 @@ def ensure_ingest_group(
 
 
 async def cache_temu_image_task(product_id: int, image_url: str) -> None:
+    normalized_url = normalize_temu_image_url(image_url)
     try:
         with SessionLocal() as db:
             product = db.get(TemuProduct, product_id)
             if not product:
                 return
-            filename = await cache_product_image(product.temu_product_id, image_url, settings, namespace="temu")
+            filename = await cache_product_image(
+                product.temu_product_id,
+                normalized_url,
+                settings,
+                namespace="temu",
+            )
             image_changed = filename != product.cached_image_name
+            product.image_url = normalized_url
             product.cached_image_name = filename
             product.image_status = "ready"
             if image_changed:
@@ -171,11 +180,18 @@ async def cache_temu_image_task(product_id: int, image_url: str) -> None:
             else:
                 product.similarity_status = "disabled"
             db.commit()
-    except Exception:
+    except Exception as error:
+        logger.exception(
+            "Failed to cache Temu image for product %s from %s: %s",
+            product_id,
+            normalized_url,
+            error,
+        )
         with SessionLocal() as db:
             product = db.get(TemuProduct, product_id)
             if product:
                 product.image_status = "failed"
+                product.similarity_status = "failed"
                 db.commit()
 
 

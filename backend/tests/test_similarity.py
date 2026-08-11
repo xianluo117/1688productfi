@@ -18,6 +18,8 @@ from app.models import (
     ProductSimilarityClusterMember,
     SimilarityAuditLog,
     SimilarityTask,
+    TemuProduct,
+    TemuSimilarityTask,
 )
 from app.similarity_router import apply_candidate_decision
 from app.similarity_services import (
@@ -25,12 +27,13 @@ from app.similarity_services import (
     build_embedding_request,
     embedding_endpoint_url,
     embedding_request_headers,
+    enqueue_scope_products,
+    enqueue_scope_temu_products,
     extract_embedding_values,
     merge_products,
     normalize_vector,
     phash_distance,
     prepare_embedding_image,
-    enqueue_scope_products,
     queue_control,
     reset_embedding_scope,
     scope_product_ids,
@@ -250,6 +253,32 @@ def test_enqueue_scope_products_skips_duplicate_current_task():
         db.flush()
         assert enqueue_scope_products(db, config, [item.id]) == 1
         assert db.query(SimilarityTask).count() == 1
+
+
+def test_enqueue_scope_temu_products_accepts_remote_image_without_cache():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        config = ImageEmbeddingConfig(
+            name="test",
+            base_url="https://example.com/v1beta",
+            model_name="gemini-embedding-2",
+            output_dimension=1536,
+            request_template={},
+            response_path="embedding.values",
+        )
+        item = TemuProduct(
+            temu_product_id="9001",
+            title="Temu remote image",
+            product_url="https://www.temu.com/g-9001.html",
+            image_url="https://img.kwcdn.com/product/fancy/remote.jpg",
+            image_status="pending",
+        )
+        db.add_all([config, item])
+        db.flush()
+
+        assert enqueue_scope_temu_products(db, config, [item.id]) == 1
+        assert db.query(TemuSimilarityTask).count() == 1
 
 
 def test_reset_embedding_scope_preserves_unselected_tasks():

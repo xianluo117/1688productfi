@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal
+from .image_cache import cache_product_image, normalize_temu_image_url
 from .models import (
     ImageEmbeddingConfig,
     Product,
@@ -123,22 +124,48 @@ async def process_task(task_id: int) -> None:
 
 
 async def process_temu_task(task_id: int) -> None:
-    with SessionLocal() as db:
-        task = db.get(TemuSimilarityTask, task_id)
-        if not task:
-            return
-        product = db.get(TemuProduct, task.product_id)
-        config = db.get(ImageEmbeddingConfig, task.config_id)
-        if not product or not config or not product.cached_image_name:
-            task.status = "failed"
-            task.last_error = "Temu 商品、模型配置或缓存图片不存在"
-            task.finished_at = datetime.now(timezone.utc)
-            task.locked_at = None
-            db.commit()
-            return
-        image_path = settings.image_storage_path / product.cached_image_name
+    image_prepared = False
     try:
+        with SessionLocal() as db:
+            task = db.get(TemuSimilarityTask, task_id)
+            if not task:
+                return
+            product = db.get(TemuProduct, task.product_id)
+            config = db.get(ImageEmbeddingConfig, task.config_id)
+            if not product or not config:
+                task.status = "failed"
+                task.last_error = "Temu 商品或模型配置不存在"
+                task.finished_at = datetime.now(timezone.utc)
+                task.locked_at = None
+                db.commit()
+                return
+            cached_path = (
+                settings.image_storage_path / product.cached_image_name
+                if product.cached_image_name
+                else None
+            )
+            if cached_path is None or not cached_path.is_file():
+                if not product.image_url:
+                    product.image_status = "missing"
+                    raise FileNotFoundError("Temu 商品没有可用的缓存图片或远程图片 URL")
+                normalized_url = normalize_temu_image_url(product.image_url)
+                filename = await cache_product_image(
+                    product.temu_product_id,
+                    normalized_url,
+                    settings,
+                    namespace="temu",
+                )
+                product.image_url = normalized_url
+                product.cached_image_name = filename
+                product.image_status = "ready"
+                product.image_content_hash = None
+                product.image_phash = None
+                db.commit()
+                image_path = settings.image_storage_path / filename
+            else:
+                image_path = cached_path
         content_hash, phash, content = await asyncio.to_thread(image_fingerprints, image_path)
+        image_prepared = True
         with SessionLocal() as db:
             task = db.get(TemuSimilarityTask, task_id)
             if not task:
@@ -190,11 +217,16 @@ async def process_temu_task(task_id: int) -> None:
             task.last_error = None
             db.commit()
     except Exception as error:
-        logger.exception("Temu similarity task %s failed", task_id)
+        logger.exception("Temu similarity task %s failed: %s", task_id, error)
         with SessionLocal() as db:
             task = db.get(TemuSimilarityTask, task_id)
             if not task:
                 return
+            product = db.get(TemuProduct, task.product_id)
+            if product:
+                if not image_prepared and product.image_status != "missing":
+                    product.image_status = "failed"
+                product.similarity_status = "failed"
             task.last_error = f"{type(error).__name__}: {error}"[:4000]
             task.locked_at = None
             if task.attempts >= 5:
