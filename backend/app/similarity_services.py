@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 from .config import Settings
 from .models import (
     AdminUser,
+    CrossPlatformProductRelation,
+    CrossPlatformSimilarityCandidate,
     ImageEmbeddingConfig,
     Product,
     ProductGroup,
@@ -30,6 +32,14 @@ from .models import (
     SimilarityAuditLog,
     SimilarityQueueControl,
     SimilarityTask,
+    TemuGroupMembership,
+    TemuImageEmbedding,
+    TemuProduct,
+    TemuProductGroup,
+    TemuSimilarityCandidate,
+    TemuSimilarityCluster,
+    TemuSimilarityClusterMember,
+    TemuSimilarityTask,
 )
 
 VECTOR_STORAGE_DIMENSION = 1536
@@ -118,6 +128,41 @@ def enqueue_product(db: Session, product: Product, config: ImageEmbeddingConfig 
     return task
 
 
+def enqueue_temu_product(
+    db: Session,
+    product: TemuProduct,
+    config: ImageEmbeddingConfig | None = None,
+) -> TemuSimilarityTask | None:
+    if not product.cached_image_name or product.image_status != "ready":
+        return None
+    config = config or active_config(db)
+    if config is None:
+        product.similarity_status = "disabled"
+        return None
+    image_hash = product.image_content_hash or f"pending:{product.cached_image_name}"
+    existing = db.scalar(select(TemuSimilarityTask).where(
+        TemuSimilarityTask.product_id == product.id,
+        TemuSimilarityTask.config_id == config.id,
+        TemuSimilarityTask.image_content_hash == image_hash,
+    ))
+    if existing:
+        if existing.status == "completed" and not db.scalar(select(TemuImageEmbedding).where(
+            TemuImageEmbedding.product_id == product.id,
+            TemuImageEmbedding.config_id == config.id,
+            TemuImageEmbedding.image_content_hash == image_hash,
+        )):
+            existing.status = "pending"
+            existing.attempts = 0
+            existing.last_error = None
+            existing.available_at = datetime.now(timezone.utc)
+            existing.finished_at = None
+        return existing
+    task = TemuSimilarityTask(product_id=product.id, config_id=config.id, image_content_hash=image_hash)
+    product.similarity_status = "pending"
+    db.add(task)
+    return task
+
+
 def scope_product_ids(
     db: Session,
     owner_id: int | None,
@@ -148,6 +193,23 @@ def scope_product_ids(
     )
 
 
+def scope_temu_product_ids(db: Session, owner_id: int | None, group_ids: list[int]) -> list[int]:
+    if not group_ids:
+        return list(db.scalars(select(TemuProduct.id).order_by(TemuProduct.id)))
+    if owner_id is None:
+        raise ValueError("选择具体 Temu 分组时必须指定用户")
+    valid_group_count = db.scalar(select(func.count(TemuProductGroup.id)).where(
+        TemuProductGroup.owner_id == owner_id,
+        TemuProductGroup.id.in_(group_ids),
+    ))
+    if valid_group_count != len(set(group_ids)):
+        raise ValueError("所选 Temu 分组不存在或不属于指定用户")
+    return list(db.scalars(select(TemuGroupMembership.product_id).where(
+        TemuGroupMembership.owner_id == owner_id,
+        TemuGroupMembership.group_id.in_(group_ids),
+    ).distinct()))
+
+
 def enqueue_scope_products(
     db: Session,
     config: ImageEmbeddingConfig,
@@ -166,6 +228,31 @@ def enqueue_scope_products(
     count = 0
     for product in products:
         task = enqueue_product(db, product, config)
+        if not task:
+            continue
+        if force:
+            task.status = "pending"
+            task.attempts = 0
+            task.last_error = None
+            task.available_at = datetime.now(timezone.utc)
+            task.locked_at = None
+            task.finished_at = None
+            product.similarity_status = "pending"
+        count += 1
+    return count
+
+
+def enqueue_scope_temu_products(db: Session, config: ImageEmbeddingConfig, product_ids: list[int], force: bool = False) -> int:
+    if not product_ids:
+        return 0
+    products = db.scalars(select(TemuProduct).where(
+        TemuProduct.id.in_(product_ids),
+        TemuProduct.cached_image_name.is_not(None),
+        TemuProduct.image_status == "ready",
+    )).all()
+    count = 0
+    for product in products:
+        task = enqueue_temu_product(db, product, config)
         if not task:
             continue
         if force:
@@ -220,9 +307,12 @@ def reset_embedding_scope(
                 .where(Product.id.in_(affected_product_ids))
                 .values(similarity_status="pending")
             )
-    candidate_filter = (
-        (ProductSimilarityCandidate.left_product_id.in_(product_ids))
-        | (ProductSimilarityCandidate.right_product_id.in_(product_ids))
+    candidate_filter = and_(
+        (
+            (ProductSimilarityCandidate.left_product_id.in_(product_ids))
+            | (ProductSimilarityCandidate.right_product_id.in_(product_ids))
+        ),
+        ProductSimilarityCandidate.status != "approved",
     )
     task_filter = SimilarityTask.product_id.in_(product_ids)
     embedding_filter = ProductImageEmbedding.product_id.in_(product_ids)
@@ -235,6 +325,34 @@ def reset_embedding_scope(
     db.execute(delete(ProductImageEmbedding).where(embedding_filter))
     db.flush()
     return enqueue_scope_products(db, config, product_ids)
+
+
+def reset_temu_embedding_scope(db: Session, config: ImageEmbeddingConfig, product_ids: list[int]) -> int:
+    if not product_ids:
+        return 0
+    candidate_filter = and_(
+        or_(
+            TemuSimilarityCandidate.left_product_id.in_(product_ids),
+            TemuSimilarityCandidate.right_product_id.in_(product_ids),
+        ),
+        TemuSimilarityCandidate.status != "approved",
+        TemuSimilarityCandidate.config_id == config.id,
+    )
+    cross_filter = and_(
+        CrossPlatformSimilarityCandidate.temu_product_id.in_(product_ids),
+        CrossPlatformSimilarityCandidate.status != "approved",
+        CrossPlatformSimilarityCandidate.config_id == config.id,
+    )
+    db.execute(delete(TemuSimilarityCandidate).where(candidate_filter))
+    db.execute(delete(CrossPlatformSimilarityCandidate).where(cross_filter))
+    db.execute(delete(TemuSimilarityTask).where(
+        TemuSimilarityTask.product_id.in_(product_ids), TemuSimilarityTask.config_id == config.id
+    ))
+    db.execute(delete(TemuImageEmbedding).where(
+        TemuImageEmbedding.product_id.in_(product_ids), TemuImageEmbedding.config_id == config.id
+    ))
+    db.flush()
+    return enqueue_scope_temu_products(db, config, product_ids)
 
 
 def prepare_embedding_image(content: bytes) -> bytes:
@@ -281,15 +399,15 @@ def _replace_template(value: Any, replacements: dict[str, Any]) -> Any:
     return result
 
 
-def build_embedding_request(config: ImageEmbeddingConfig, product: Product, content: bytes) -> dict[str, Any]:
+def build_embedding_request(config: ImageEmbeddingConfig, product: Product | TemuProduct, content: bytes) -> dict[str, Any]:
     image_base64 = base64.b64encode(content).decode("ascii")
     replacements = {
         "{{model}}": config.model_name,
         "{{output_dimension}}": config.output_dimension,
         "{{image_base64}}": image_base64,
         "{{image_data_url}}": f"data:image/jpeg;base64,{image_base64}",
-        "{{image_url}}": product.original_image_url or "",
-        "{{product_id}}": product.offer_id,
+        "{{image_url}}": getattr(product, "original_image_url", None) or getattr(product, "image_url", None) or "",
+        "{{product_id}}": getattr(product, "offer_id", None) or getattr(product, "temu_product_id", ""),
     }
     return _replace_template(gemini_request_template(), replacements)
 
@@ -371,7 +489,7 @@ def embedding_request_headers(api_key: str | None) -> dict[str, str]:
 
 async def request_embedding(
     config: ImageEmbeddingConfig,
-    product: Product,
+    product: Product | TemuProduct,
     content: bytes,
     settings: Settings,
 ) -> list[float]:
@@ -564,6 +682,129 @@ def upsert_candidate(
     return candidate
 
 
+def _temu_cluster_for_product(db: Session, product_id: int) -> TemuSimilarityCluster | None:
+    return db.scalar(select(TemuSimilarityCluster).join(TemuSimilarityClusterMember).where(
+        TemuSimilarityClusterMember.product_id == product_id
+    ))
+
+
+def merge_temu_products(
+    db: Session,
+    left_product_id: int,
+    right_product_id: int,
+    confidence: float | None,
+    actor_id: int | None,
+    candidate_id: int,
+) -> TemuSimilarityCluster:
+    left_cluster = _temu_cluster_for_product(db, left_product_id)
+    right_cluster = _temu_cluster_for_product(db, right_product_id)
+    if left_cluster and right_cluster and left_cluster.id == right_cluster.id:
+        return left_cluster
+    if left_cluster is None:
+        left_cluster = TemuSimilarityCluster(representative_product_id=left_product_id)
+        db.add(left_cluster)
+        db.flush()
+        db.add(TemuSimilarityClusterMember(
+            cluster_id=left_cluster.id, product_id=left_product_id, confidence=confidence, added_by=actor_id
+        ))
+    if right_cluster is None:
+        db.add(TemuSimilarityClusterMember(
+            cluster_id=left_cluster.id, product_id=right_product_id, confidence=confidence, added_by=actor_id
+        ))
+    else:
+        for member in db.scalars(select(TemuSimilarityClusterMember).where(
+            TemuSimilarityClusterMember.cluster_id == right_cluster.id
+        )).all():
+            member.cluster_id = left_cluster.id
+        db.flush()
+        db.delete(right_cluster)
+    db.flush()
+    products = db.scalars(select(TemuProduct).join(
+        TemuSimilarityClusterMember, TemuSimilarityClusterMember.product_id == TemuProduct.id
+    ).where(TemuSimilarityClusterMember.cluster_id == left_cluster.id)).all()
+    left_cluster.representative_product_id = max(
+        products, key=lambda item: (item.total_sales, item.daily_sales, item.last_collected_at)
+    ).id
+    db.add(SimilarityAuditLog(
+        action="merge", actor_id=actor_id, candidate_type="temu_same", external_candidate_id=candidate_id,
+        payload={"left_product_id": left_product_id, "right_product_id": right_product_id},
+    ))
+    return left_cluster
+
+
+def upsert_temu_candidate(
+    db: Session, product_id: int, other_id: int, config: ImageEmbeddingConfig, distance: int, similarity: float
+) -> TemuSimilarityCandidate:
+    left_id, right_id = sorted((product_id, other_id))
+    candidate = db.scalar(select(TemuSimilarityCandidate).where(
+        TemuSimilarityCandidate.left_product_id == left_id,
+        TemuSimilarityCandidate.right_product_id == right_id,
+        TemuSimilarityCandidate.config_id == config.id,
+    ))
+    if candidate is None:
+        candidate = TemuSimilarityCandidate(left_product_id=left_id, right_product_id=right_id, config_id=config.id)
+        db.add(candidate)
+    if candidate.status == "approved":
+        return candidate
+    candidate.phash_distance = distance
+    candidate.image_similarity = similarity
+    candidate.status = "pending" if distance <= config.phash_auto_distance or similarity >= config.review_threshold else "ignored"
+    return candidate
+
+
+def upsert_cross_candidate(
+    db: Session, product_id: int, temu_product_id: int, config: ImageEmbeddingConfig, distance: int, similarity: float
+) -> CrossPlatformSimilarityCandidate:
+    candidate = db.scalar(select(CrossPlatformSimilarityCandidate).where(
+        CrossPlatformSimilarityCandidate.product_id == product_id,
+        CrossPlatformSimilarityCandidate.temu_product_id == temu_product_id,
+        CrossPlatformSimilarityCandidate.config_id == config.id,
+    ))
+    if candidate is None:
+        candidate = CrossPlatformSimilarityCandidate(
+            product_id=product_id, temu_product_id=temu_product_id, config_id=config.id
+        )
+        db.add(candidate)
+    if candidate.status == "approved":
+        return candidate
+    candidate.phash_distance = distance
+    candidate.image_similarity = similarity
+    candidate.status = "pending" if distance <= config.phash_auto_distance or similarity >= config.review_threshold else "ignored"
+    return candidate
+
+
+def _score_embeddings(source, others, config: ImageEmbeddingConfig):
+    selected = {item.id: item for item in others[:config.top_k]}
+    for item in others:
+        if phash_distance(source.phash, item.phash) <= config.phash_auto_distance:
+            selected[item.id] = item
+    scored = []
+    for item in selected.values():
+        distance = phash_distance(source.phash, item.phash)
+        similarity = cosine_similarity(list(source.vector), list(item.vector))
+        if distance <= config.phash_auto_distance or similarity >= config.review_threshold:
+            scored.append((similarity, item, distance))
+    return sorted(scored, key=lambda value: value[0], reverse=True)
+
+
+def generate_temu_candidates(db: Session, embedding: TemuImageEmbedding, config: ImageEmbeddingConfig) -> int:
+    same_platform = db.scalars(select(TemuImageEmbedding).where(
+        TemuImageEmbedding.config_id == config.id,
+        TemuImageEmbedding.product_id != embedding.product_id,
+    ).order_by(TemuImageEmbedding.vector.cosine_distance(embedding.vector))).all()
+    cross_platform = db.scalars(select(ProductImageEmbedding).where(
+        ProductImageEmbedding.config_id == config.id
+    ).order_by(ProductImageEmbedding.vector.cosine_distance(embedding.vector))).all()
+    count = 0
+    for similarity, other, distance in _score_embeddings(embedding, same_platform, config):
+        upsert_temu_candidate(db, embedding.product_id, other.product_id, config, distance, similarity)
+        count += 1
+    for similarity, other, distance in _score_embeddings(embedding, cross_platform, config):
+        upsert_cross_candidate(db, other.product_id, embedding.product_id, config, distance, similarity)
+        count += 1
+    return count
+
+
 def generate_candidates(
     db: Session,
     embedding: ProductImageEmbedding,
@@ -599,6 +840,12 @@ def generate_candidates(
     for similarity, other, distance in scored:
         upsert_candidate(db, product.id, other.product_id, config, distance, similarity)
         count += 1
+    temu_embeddings = db.scalars(select(TemuImageEmbedding).where(
+        TemuImageEmbedding.config_id == config.id
+    ).order_by(TemuImageEmbedding.vector.cosine_distance(embedding.vector))).all()
+    for similarity, other, distance in _score_embeddings(embedding, temu_embeddings, config):
+        upsert_cross_candidate(db, product.id, other.product_id, config, distance, similarity)
+        count += 1
     return count
 
 
@@ -615,6 +862,24 @@ def queue_control(db: Session, create: bool = True) -> SimilarityQueueControl | 
         db.commit()
         db.refresh(control)
     return control
+
+
+def claim_temu_task(db: Session) -> TemuSimilarityTask | None:
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=10)
+    task = db.scalar(select(TemuSimilarityTask).where(
+        TemuSimilarityTask.available_at <= now,
+        or_(
+            TemuSimilarityTask.status == "pending",
+            and_(TemuSimilarityTask.status == "processing", TemuSimilarityTask.locked_at < stale),
+        ),
+    ).order_by(TemuSimilarityTask.id).with_for_update(skip_locked=True))
+    if task:
+        task.status = "processing"
+        task.locked_at = now
+        task.attempts += 1
+        db.commit()
+    return task
 
 
 def claim_task(db: Session) -> SimilarityTask | None:
@@ -644,6 +909,9 @@ def task_stats(db: Session) -> dict[str, Any]:
     rows = db.execute(
         select(SimilarityTask.status, func.count(SimilarityTask.id)).group_by(SimilarityTask.status)
     ).all()
+    temu_rows = db.execute(
+        select(TemuSimilarityTask.status, func.count(TemuSimilarityTask.id)).group_by(TemuSimilarityTask.status)
+    ).all()
     result: dict[str, Any] = {
         "pending": 0,
         "processing": 0,
@@ -651,16 +919,19 @@ def task_stats(db: Session) -> dict[str, Any]:
         "failed": 0,
         "cancelled": 0,
     }
-    result.update({status: int(count) for status, count in rows})
-    result["review_pending"] = int(db.scalar(
-        select(func.count(ProductSimilarityCandidate.id)).where(ProductSimilarityCandidate.status == "pending")
-    ) or 0)
-    result["completed_last_minute"] = int(db.scalar(
-        select(func.count(SimilarityTask.id)).where(
-            SimilarityTask.status == "completed",
-            SimilarityTask.finished_at >= datetime.now(timezone.utc) - timedelta(minutes=1),
-        )
-    ) or 0)
+    for task_status, count in [*rows, *temu_rows]:
+        result[task_status] = result.get(task_status, 0) + int(count)
+    result["review_pending"] = sum((
+        int(db.scalar(select(func.count(ProductSimilarityCandidate.id)).where(ProductSimilarityCandidate.status == "pending")) or 0),
+        int(db.scalar(select(func.count(TemuSimilarityCandidate.id)).where(TemuSimilarityCandidate.status == "pending")) or 0),
+        int(db.scalar(select(func.count(CrossPlatformSimilarityCandidate.id)).where(CrossPlatformSimilarityCandidate.status == "pending")) or 0),
+    ))
+    since = datetime.now(timezone.utc) - timedelta(minutes=1)
+    result["completed_last_minute"] = int(db.scalar(select(func.count(SimilarityTask.id)).where(
+        SimilarityTask.status == "completed", SimilarityTask.finished_at >= since
+    )) or 0) + int(db.scalar(select(func.count(TemuSimilarityTask.id)).where(
+        TemuSimilarityTask.status == "completed", TemuSimilarityTask.finished_at >= since
+    )) or 0)
     control = queue_control(db)
     result["queue_state"] = control.state
     result["concurrency"] = control.concurrency

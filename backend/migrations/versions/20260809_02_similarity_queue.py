@@ -28,10 +28,17 @@ def upgrade() -> None:
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
             sa.PrimaryKeyConstraint("id"),
         )
-    op.execute(
-        "INSERT INTO similarity_queue_control (id, state, concurrency) "
-        "VALUES (1, 'running', 4) ON CONFLICT (id) DO NOTHING"
-    )
+    columns = {column["name"] for column in inspect(bind).get_columns("similarity_queue_control")}
+    if "auto_vectorization_enabled" in columns:
+        op.execute(
+            "INSERT INTO similarity_queue_control (id, state, concurrency, auto_vectorization_enabled) "
+            "VALUES (1, 'running', 4, true) ON CONFLICT (id) DO NOTHING"
+        )
+    else:
+        op.execute(
+            "INSERT INTO similarity_queue_control (id, state, concurrency) "
+            "VALUES (1, 'running', 4) ON CONFLICT (id) DO NOTHING"
+        )
 
 
 def downgrade() -> None:

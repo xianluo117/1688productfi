@@ -21,6 +21,8 @@ const stats = reactive({
 const scopes = ref([]);
 const selectedOwnerId = ref(null);
 const selectedGroupIds = ref([]);
+const selectedTemuGroupIds = ref([]);
+let restoringScope = true;
 const failedTasks = ref([]);
 const selectedCandidateIds = ref([]);
 const batchDeciding = ref(false);
@@ -45,14 +47,26 @@ const form = reactive({
   activate: true,
 });
 
+const productScopes = computed(() =>
+  scopes.value.filter((group) => group.platform === "1688"),
+);
+const temuScopes = computed(() =>
+  scopes.value.filter((group) => group.platform === "temu"),
+);
 const selectedScopeGroups = computed(() =>
-  scopes.value.filter((group) => selectedGroupIds.value.includes(group.id)),
+  scopes.value.filter((group) =>
+    group.platform === "1688"
+      ? selectedGroupIds.value.includes(group.id)
+      : selectedTemuGroupIds.value.includes(group.id),
+  ),
 );
 const allCandidatesSelected = computed(
   () =>
     candidates.value.length > 0 &&
     candidates.value.every((candidate) =>
-      selectedCandidateIds.value.includes(candidate.id),
+      selectedCandidateIds.value.includes(
+        `${candidate.candidate_type}:${candidate.id}`,
+      ),
     ),
 );
 const selectedReadyCount = computed(() =>
@@ -61,36 +75,71 @@ const selectedReadyCount = computed(() =>
     0,
   ),
 );
-const scopeDescription = computed(() =>
-  selectedGroupIds.value.length
-    ? `所选用户的 ${selectedGroupIds.value.length} 个分组`
-    : "全部用户的全部 1688 商品",
-);
+const scopeDescription = computed(() => {
+  const count =
+    selectedGroupIds.value.length + selectedTemuGroupIds.value.length;
+  return count
+    ? `所选用户的 ${count} 个跨平台分组`
+    : "全部用户的全部 1688 与 Temu 商品";
+});
 
 async function loadScopes() {
-  selectedGroupIds.value = [];
   if (!selectedOwnerId.value) {
     scopes.value = [];
     return;
   }
+  const configParam = form.id ? `&config_id=${form.id}` : "";
   scopes.value = await api(
-    `/api/similarity/admin/scopes?owner_id=${selectedOwnerId.value}`,
+    `/api/similarity/admin/scopes?owner_id=${selectedOwnerId.value}${configParam}`,
+  );
+  selectedGroupIds.value = selectedGroupIds.value.filter((id) =>
+    productScopes.value.some((group) => group.id === id),
+  );
+  selectedTemuGroupIds.value = selectedTemuGroupIds.value.filter((id) =>
+    temuScopes.value.some((group) => group.id === id),
   );
 }
 
+async function saveScopePreference() {
+  if (restoringScope || !selectedOwnerId.value) return;
+  await api("/api/similarity/admin/scope-preference", {
+    method: "PUT",
+    body: JSON.stringify(scopePayload()),
+  });
+}
+
 async function load() {
-  [configs.value, candidates.value, failedTasks.value] = await Promise.all([
-    api("/api/similarity/admin/configs"),
-    api("/api/similarity/admin/candidates?status=pending&limit=100"),
-    api("/api/similarity/admin/tasks?status=failed&limit=100"),
-  ]);
+  const preferenceRequest = restoringScope
+    ? api("/api/similarity/admin/scope-preference")
+    : Promise.resolve(null);
+  const [loadedConfigs, loadedCandidates, loadedTasks, preference] =
+    await Promise.all([
+      api("/api/similarity/admin/configs"),
+      api("/api/similarity/admin/candidates?status=pending&limit=100"),
+      api("/api/similarity/admin/tasks?status=failed&limit=100"),
+      preferenceRequest,
+    ]);
+  configs.value = loadedConfigs;
+  candidates.value = loadedCandidates;
+  failedTasks.value = loadedTasks;
+  if (preference) {
+    selectedOwnerId.value = preference.owner_id || props.users[0]?.id || null;
+    selectedGroupIds.value = preference.group_ids;
+    selectedTemuGroupIds.value = preference.temu_group_ids;
+  }
   Object.assign(stats, await api("/api/similarity/admin/stats"));
   selectedCandidateIds.value = selectedCandidateIds.value.filter((id) =>
-    candidates.value.some((candidate) => candidate.id === id),
+    candidates.value.some(
+      (candidate) => `${candidate.candidate_type}:${candidate.id}` === id,
+    ),
   );
   if (!form.id && configs.value.length) selectConfig(configs.value[0]);
   if (!selectedOwnerId.value && props.users.length) {
     selectedOwnerId.value = props.users[0].id;
+  }
+  if (restoringScope && selectedOwnerId.value) {
+    await loadScopes();
+    restoringScope = false;
   }
 }
 
@@ -229,9 +278,12 @@ async function testConfig(config) {
 }
 
 function scopePayload() {
+  const hasSelection =
+    selectedGroupIds.value.length || selectedTemuGroupIds.value.length;
   return {
-    owner_id: selectedGroupIds.value.length ? selectedOwnerId.value : null,
+    owner_id: hasSelection ? selectedOwnerId.value : null,
     group_ids: selectedGroupIds.value,
+    temu_group_ids: selectedTemuGroupIds.value,
   };
 }
 
@@ -252,7 +304,7 @@ async function enqueueSelectedScope(config) {
 async function rebuild(config) {
   if (
     !window.confirm(
-      `确认清除并重建 ${scopeDescription.value} 的任务、候选和向量？此操作会删除该范围已有结果。`,
+      `确认重新处理 ${scopeDescription.value}？会重建当前模型的任务、向量和未确认候选，但保留人工确认关系与审计记录。`,
     )
   )
     return;
@@ -264,12 +316,16 @@ async function rebuild(config) {
 }
 
 async function decide(candidate, decision) {
-  await api(`/api/similarity/admin/candidates/${candidate.id}/decision`, {
-    method: "POST",
-    body: JSON.stringify({ decision }),
-  });
+  await api(
+    `/api/similarity/admin/candidates/${candidate.candidate_type}/${candidate.id}/decision`,
+    {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    },
+  );
+  const typedId = `${candidate.candidate_type}:${candidate.id}`;
   selectedCandidateIds.value = selectedCandidateIds.value.filter(
-    (id) => id !== candidate.id,
+    (id) => id !== typedId,
   );
   await load();
 }
@@ -277,7 +333,9 @@ async function decide(candidate, decision) {
 function toggleSelectAll() {
   selectedCandidateIds.value = allCandidatesSelected.value
     ? []
-    : candidates.value.map((candidate) => candidate.id);
+    : candidates.value.map(
+        (candidate) => `${candidate.candidate_type}:${candidate.id}`,
+      );
 }
 
 async function batchDecide(decision) {
@@ -309,7 +367,17 @@ function formatScore(value) {
   return value === null || value === undefined ? "-" : Number(value).toFixed(4);
 }
 
-watch(selectedOwnerId, loadScopes);
+watch(selectedOwnerId, async () => {
+  if (!restoringScope) {
+    selectedGroupIds.value = [];
+    selectedTemuGroupIds.value = [];
+    await loadScopes();
+    await saveScopePreference();
+  }
+});
+watch([selectedGroupIds, selectedTemuGroupIds], saveScopePreference, {
+  deep: true,
+});
 
 onMounted(async () => {
   await load();
@@ -393,7 +461,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
         <div>
           <h3>向量化运行范围</h3>
           <span
-            >选择具体用户和分组；不选择任何分组时表示全部用户、全部分组</span
+            >分组选择按管理员账号保存；不选择分组时处理两个平台的全部商品</span
           >
         </div>
       </div>
@@ -405,28 +473,53 @@ onUnmounted(() => window.clearInterval(refreshTimer));
           </option>
         </select>
       </label>
+      <h4>1688 分组</h4>
       <div class="scope-group-list">
-        <label v-for="group in scopes" :key="group.id" class="scope-group-item">
+        <label
+          v-for="group in productScopes"
+          :key="`1688-${group.id}`"
+          class="scope-group-item"
+        >
           <input v-model="selectedGroupIds" type="checkbox" :value="group.id" />
-          <span>
-            <strong>{{ group.name }}</strong>
-            <small>
-              共 {{ group.product_count }} 个，图片就绪
-              {{ group.ready_product_count }} 个
-            </small>
-          </span>
+          <span
+            ><strong>{{ group.name }}</strong
+            ><small>
+              共 {{ group.product_count }}，图片就绪
+              {{ group.ready_product_count }}，已处理
+              {{ group.processed_product_count }}，待处理
+              {{ group.pending_product_count }}
+            </small></span
+          >
         </label>
-        <p v-if="!scopes.length" class="empty">该用户暂无 1688 分组</p>
+        <p v-if="!productScopes.length" class="empty">该用户暂无 1688 分组</p>
+      </div>
+      <h4>Temu 分组</h4>
+      <div class="scope-group-list">
+        <label
+          v-for="group in temuScopes"
+          :key="`temu-${group.id}`"
+          class="scope-group-item"
+        >
+          <input
+            v-model="selectedTemuGroupIds"
+            type="checkbox"
+            :value="group.id"
+          />
+          <span
+            ><strong>{{ group.name }}</strong
+            ><small>
+              共 {{ group.product_count }}，图片就绪
+              {{ group.ready_product_count }}，已处理
+              {{ group.processed_product_count }}，待处理
+              {{ group.pending_product_count }}
+            </small></span
+          >
+        </label>
+        <p v-if="!temuScopes.length" class="empty">该用户暂无 Temu 分组</p>
       </div>
       <p class="form-help">
-        当前范围：{{ scopeDescription }}。
-        <template v-if="selectedGroupIds.length">
-          分组内图片就绪成员约
-          {{ selectedReadyCount }} 个；跨分组商品只处理一次。
-        </template>
-        <template v-else>
-          手动启动或清除重建时会处理数据库中的全部 1688 商品。
-        </template>
+        当前范围：{{ scopeDescription }}。图片就绪成员约
+        {{ selectedReadyCount }} 个，跨分组商品只处理一次。
       </p>
     </section>
 
@@ -565,7 +658,7 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             class="secondary"
             @click="rebuild(form)"
           >
-            清除并重建当前范围
+            重新处理当前范围
           </button>
           <button
             v-if="form.id"
@@ -645,15 +738,19 @@ onUnmounted(() => window.clearInterval(refreshTimer));
       </div>
       <article
         v-for="candidate in candidates"
-        :key="candidate.id"
+        :key="`${candidate.candidate_type}-${candidate.id}`"
         class="candidate-card"
-        :class="{ selected: selectedCandidateIds.includes(candidate.id) }"
+        :class="{
+          selected: selectedCandidateIds.includes(
+            `${candidate.candidate_type}:${candidate.id}`,
+          ),
+        }"
       >
         <label class="candidate-select" title="选择该候选">
           <input
             v-model="selectedCandidateIds"
             type="checkbox"
-            :value="candidate.id"
+            :value="`${candidate.candidate_type}:${candidate.id}`"
           />
         </label>
         <div class="candidate-product">
@@ -661,8 +758,14 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             v-if="candidate.left.image_url"
             :src="candidate.left.image_url"
           />
-          <strong>{{ candidate.left.offer_id }}</strong>
-          <span>总件数 {{ candidate.left.total_pieces.toLocaleString() }}</span>
+          <strong
+            >{{ candidate.left.platform }} ·
+            {{ candidate.left.external_id }}</strong
+          >
+          <span
+            >{{ candidate.left.metric_label }}
+            {{ Number(candidate.left.metric_value).toLocaleString() }}</span
+          >
           <small>{{
             candidate.left.sources
               .map((item) => `${item.username}/${item.group_name}`)
@@ -671,11 +774,15 @@ onUnmounted(() => window.clearInterval(refreshTimer));
         </div>
         <div class="candidate-score">
           <strong>{{ formatScore(candidate.image_similarity) }}</strong>
-          <span>图片相似度</span>
+          <span>{{
+            candidate.candidate_type === "cross_platform"
+              ? "跨平台货源匹配"
+              : "平台同款"
+          }}</span>
           <small>pHash 距离 {{ candidate.phash_distance ?? "-" }}</small>
           <div>
-            <button @click="decide(candidate, 'approve')">确认同款</button
-            ><button class="danger" @click="decide(candidate, 'reject')">
+            <button @click="decide(candidate, 'approve')">确认关系</button>
+            <button class="danger" @click="decide(candidate, 'reject')">
               拒绝
             </button>
           </div>
@@ -685,9 +792,13 @@ onUnmounted(() => window.clearInterval(refreshTimer));
             v-if="candidate.right.image_url"
             :src="candidate.right.image_url"
           />
-          <strong>{{ candidate.right.offer_id }}</strong>
+          <strong
+            >{{ candidate.right.platform }} ·
+            {{ candidate.right.external_id }}</strong
+          >
           <span
-            >总件数 {{ candidate.right.total_pieces.toLocaleString() }}</span
+            >{{ candidate.right.metric_label }}
+            {{ Number(candidate.right.metric_value).toLocaleString() }}</span
           >
           <small>{{
             candidate.right.sources

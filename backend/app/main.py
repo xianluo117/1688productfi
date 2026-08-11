@@ -29,7 +29,14 @@ from .auth import (
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db
 from .image_cache import cache_product_image
-from .models import AdminUser, Product, ProductGroup, ProductGroupMembership
+from .models import (
+    AdminUser,
+    CrossPlatformProductRelation,
+    Product,
+    ProductGroup,
+    ProductGroupMembership,
+    TemuProduct,
+)
 from .schemas import (
     CurrentUserResponse,
     GroupCreate,
@@ -59,6 +66,7 @@ from .services import (
     product_to_item,
     snapshot_to_response,
 )
+from .temu_services import temu_product_to_item
 from .similarity_router import router as similarity_router
 from .similarity_services import enqueue_product, queue_control
 from .temu_router import router as temu_router
@@ -476,10 +484,15 @@ def product_detail(
         key=lambda snapshot: snapshot.collected_at,
         reverse=True,
     )[:100]
+    platform_products = list(db.scalars(select(TemuProduct).join(
+        CrossPlatformProductRelation,
+        CrossPlatformProductRelation.temu_product_id == TemuProduct.id,
+    ).where(CrossPlatformProductRelation.product_id == product.id).order_by(TemuProduct.total_sales.desc())))
     return ProductDetail(
         **base,
         original_image_url=product.original_image_url,
         image_status=product.image_status,
         groups=[membership.group for membership in memberships],
         snapshots=[snapshot_to_response(snapshot) for snapshot in snapshots],
+        platform_products=[temu_product_to_item(item) for item in platform_products],
     )

@@ -15,6 +15,7 @@ from .models import (
     TemuProduct,
     TemuProductGroup,
     TemuProductSnapshot,
+    TemuSimilarityClusterMember,
 )
 from .schemas import TemuIngestBatchRequest, TemuProductListItem
 from .services import normalize_group_name
@@ -103,6 +104,8 @@ def temu_product_to_item(product: TemuProduct) -> TemuProductListItem:
         is_ad=product.is_ad,
         delivery_tip=product.delivery_tip,
         last_collected_at=product.last_collected_at,
+        cluster_id=getattr(product, "cluster_id", None),
+        cluster_member_count=getattr(product, "cluster_member_count", 1),
     )
 
 
@@ -136,13 +139,13 @@ def ingest_temu_batch(
     db: Session,
     owner: AdminUser,
     payload: TemuIngestBatchRequest,
-) -> tuple[TemuCollectionBatch, bool]:
+) -> tuple[TemuCollectionBatch, bool, list[tuple[int, str]]]:
     existing = db.scalar(select(TemuCollectionBatch).where(
         TemuCollectionBatch.owner_id == owner.id,
         TemuCollectionBatch.idempotency_key == payload.idempotency_key,
     ))
     if existing:
-        return existing, True
+        return existing, True, []
 
     group = db.scalar(select(TemuProductGroup).where(
         TemuProductGroup.id == payload.group_id,
@@ -163,6 +166,7 @@ def ingest_temu_batch(
     db.add(batch)
     db.flush()
     now = datetime.now(timezone.utc)
+    images_to_cache: list[tuple[int, str]] = []
 
     for incoming in deduplicated.values():
         if incoming.association_status not in {"商品ID匹配", "容器关联"}:
@@ -199,8 +203,13 @@ def ingest_temu_batch(
             "delivery_tip": incoming.delivery_tip,
             "last_collected_at": now,
         }
+        previous_image_url = product.image_url if product else None
         if product is None:
-            product = TemuProduct(temu_product_id=incoming.temu_product_id, **values)
+            product = TemuProduct(
+                temu_product_id=incoming.temu_product_id,
+                image_status="pending" if incoming.image_url else "missing",
+                **values,
+            )
             db.add(product)
             db.flush()
         else:
@@ -208,6 +217,13 @@ def ingest_temu_batch(
                 if key == "image_url" and value is None and product.image_url:
                     continue
                 setattr(product, key, value)
+        current_image_url = str(incoming.image_url) if incoming.image_url else previous_image_url
+        if current_image_url and (current_image_url != previous_image_url or not product.cached_image_name):
+            product.image_status = "pending"
+            product.image_content_hash = None
+            product.image_phash = None
+            product.similarity_status = "pending"
+            images_to_cache.append((product.id, current_image_url))
 
         membership = db.scalar(select(TemuGroupMembership).where(
             TemuGroupMembership.owner_id == owner.id,
@@ -240,7 +256,7 @@ def ingest_temu_batch(
 
     db.commit()
     db.refresh(batch)
-    return batch, False
+    return batch, False, images_to_cache
 
 
 def apply_temu_filters(statement, filters: TemuFilters):
@@ -296,12 +312,31 @@ def list_temu_group_products(
         TemuGroupMembership.group_id == group_id,
         TemuGroupMembership.owner_id == owner_id,
     ))
-    filtered = apply_temu_filters(select(TemuProduct).where(membership_filter), filters)
+    cluster_counts = (
+        select(
+            TemuSimilarityClusterMember.product_id.label("cluster_product_id"),
+            TemuSimilarityClusterMember.cluster_id.label("cluster_id"),
+            func.count(TemuSimilarityClusterMember.id).over(
+                partition_by=TemuSimilarityClusterMember.cluster_id
+            ).label("cluster_member_count"),
+        ).subquery()
+    )
+    filtered = apply_temu_filters(
+        select(TemuProduct, cluster_counts.c.cluster_id, cluster_counts.c.cluster_member_count)
+        .outerjoin(cluster_counts, cluster_counts.c.cluster_product_id == TemuProduct.id)
+        .where(membership_filter),
+        filters,
+    )
     counted = apply_temu_filters(select(func.count(TemuProduct.id)).where(membership_filter), filters)
     total = db.scalar(counted) or 0
     column = TEMU_SORT_COLUMNS[sort_field]
     order = column.asc() if sort_direction == "asc" else column.desc()
-    products = list(db.scalars(
+    rows = db.execute(
         filtered.order_by(order, TemuProduct.id.asc()).offset((page - 1) * page_size).limit(page_size)
-    ))
+    ).all()
+    products = []
+    for product, cluster_id, member_count in rows:
+        product.cluster_id = cluster_id
+        product.cluster_member_count = int(member_count or 1)
+        products.append(product)
     return products, total

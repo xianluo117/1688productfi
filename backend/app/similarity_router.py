@@ -14,21 +14,33 @@ from .config import Settings, get_settings
 from .database import get_db
 from .models import (
     AdminUser,
+    CrossPlatformProductRelation,
+    CrossPlatformSimilarityCandidate,
     ImageEmbeddingConfig,
     Product,
     ProductGroup,
     ProductGroupMembership,
+    ProductImageEmbedding,
     ProductSimilarityCandidate,
     ProductSimilarityCluster,
     ProductSimilarityClusterMember,
     SimilarityAuditLog,
+    SimilarityScopePreference,
     SimilarityTask,
+    TemuGroupMembership,
+    TemuImageEmbedding,
+    TemuProduct,
+    TemuProductGroup,
+    TemuSimilarityCandidate,
+    TemuSimilarityClusterMember,
+    TemuSimilarityTask,
 )
 from .schemas import (
     ImageEmbeddingConfigResponse,
     ImageEmbeddingConfigUpsert,
     SimilarityBatchDecisionRequest,
     SimilarityBatchDecisionResponse,
+    SimilarityCandidateProductResponse,
     SimilarityCandidateResponse,
     SimilarityClusterResponse,
     SimilarityConnectionTestRequest,
@@ -37,12 +49,14 @@ from .schemas import (
     SimilarityProductResponse,
     SimilarityQueueUpdate,
     SimilarityScopeGroupResponse,
+    SimilarityScopePreferenceResponse,
     SimilarityScopeRequest,
     SimilaritySourceResponse,
     SimilarityTaskResponse,
     SimilarityTaskStatsResponse,
 )
 from .services import product_to_item
+from .temu_services import temu_product_to_item
 from .similarity_services import (
     decrypt_api_key,
     embedding_endpoint_url,
@@ -51,13 +65,17 @@ from .similarity_services import (
     image_fingerprints,
     mask_api_key,
     merge_products,
+    merge_temu_products,
     product_sources,
     queue_control,
     enqueue_scope_products,
+    enqueue_scope_temu_products,
     recalculate_cluster_representative,
     request_embedding,
     reset_embedding_scope,
+    reset_temu_embedding_scope,
     scope_product_ids,
+    scope_temu_product_ids,
     task_stats,
 )
 
@@ -171,6 +189,13 @@ def update_config(
     return config_response(current)
 
 
+def resolve_scope_ids(db: Session, payload: SimilarityScopeRequest) -> tuple[list[int], list[int]]:
+    return (
+        scope_product_ids(db, payload.owner_id, payload.group_ids),
+        scope_temu_product_ids(db, payload.owner_id, payload.temu_group_ids),
+    )
+
+
 @router.post("/admin/configs/{config_id}/enqueue", response_model=SimilarityTaskStatsResponse)
 def enqueue_config_scope(
     config_id: int,
@@ -182,10 +207,11 @@ def enqueue_config_scope(
     if not config:
         raise HTTPException(status_code=404, detail="模型配置不存在")
     try:
-        product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
+        product_ids, temu_product_ids = resolve_scope_ids(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     enqueue_scope_products(db, config, product_ids)
+    enqueue_scope_temu_products(db, config, temu_product_ids)
     queue_control(db).state = "running"
     db.commit()
     return SimilarityTaskStatsResponse(**task_stats(db))
@@ -202,10 +228,11 @@ def rebuild_config(
     if not config:
         raise HTTPException(status_code=404, detail="模型配置不存在")
     try:
-        product_ids = scope_product_ids(db, payload.owner_id, payload.group_ids)
+        product_ids, temu_product_ids = resolve_scope_ids(db, payload)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     reset_embedding_scope(db, config, product_ids)
+    reset_temu_embedding_scope(db, config, temu_product_ids)
     queue_control(db).state = "running"
     db.commit()
     return SimilarityTaskStatsResponse(**task_stats(db))
@@ -241,39 +268,96 @@ def list_scopes(
     _: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
     owner_id: int = Query(gt=0),
+    config_id: int | None = Query(default=None, gt=0),
 ) -> list[SimilarityScopeGroupResponse]:
-    rows = db.execute(
-        select(
-            ProductGroup.id,
-            ProductGroup.owner_id,
-            ProductGroup.name,
-            func.count(func.distinct(ProductGroupMembership.product_id)),
-            func.count(
-                func.distinct(ProductGroupMembership.product_id)
-            ).filter(
-                Product.cached_image_name.is_not(None),
-                Product.image_status == "ready",
-            ),
-        )
-        .outerjoin(
-            ProductGroupMembership,
-            ProductGroupMembership.group_id == ProductGroup.id,
-        )
-        .outerjoin(Product, Product.id == ProductGroupMembership.product_id)
-        .where(ProductGroup.owner_id == owner_id)
-        .group_by(ProductGroup.id, ProductGroup.owner_id, ProductGroup.name)
-        .order_by(ProductGroup.name.asc())
-    ).all()
-    return [
-        SimilarityScopeGroupResponse(
-            id=group_id,
-            owner_id=row_owner_id,
-            name=name,
-            product_count=int(product_count),
-            ready_product_count=int(ready_product_count),
-        )
-        for group_id, row_owner_id, name, product_count, ready_product_count in rows
-    ]
+    config = db.get(ImageEmbeddingConfig, config_id) if config_id else db.scalar(
+        select(ImageEmbeddingConfig).where(ImageEmbeddingConfig.is_active.is_(True))
+    )
+    result: list[SimilarityScopeGroupResponse] = []
+    product_rows = db.execute(select(
+        ProductGroup.id, ProductGroup.owner_id, ProductGroup.name,
+        func.count(func.distinct(ProductGroupMembership.product_id)),
+        func.count(func.distinct(ProductGroupMembership.product_id)).filter(
+            Product.cached_image_name.is_not(None), Product.image_status == "ready"
+        ),
+    ).outerjoin(ProductGroupMembership, ProductGroupMembership.group_id == ProductGroup.id)
+      .outerjoin(Product, Product.id == ProductGroupMembership.product_id)
+      .where(ProductGroup.owner_id == owner_id)
+      .group_by(ProductGroup.id, ProductGroup.owner_id, ProductGroup.name)
+      .order_by(ProductGroup.name.asc())).all()
+    for group_id, row_owner_id, name, product_count, ready_count in product_rows:
+        processed = int(db.scalar(select(func.count(func.distinct(ProductImageEmbedding.product_id))).join(
+            ProductGroupMembership, ProductGroupMembership.product_id == ProductImageEmbedding.product_id
+        ).where(
+            ProductGroupMembership.group_id == group_id,
+            ProductImageEmbedding.config_id == config.id if config else False,
+        )) or 0)
+        result.append(SimilarityScopeGroupResponse(
+            id=group_id, owner_id=row_owner_id, platform="1688", name=name,
+            product_count=int(product_count), ready_product_count=int(ready_count),
+            processed_product_count=processed, pending_product_count=max(0, int(ready_count) - processed),
+        ))
+    temu_rows = db.execute(select(
+        TemuProductGroup.id, TemuProductGroup.owner_id, TemuProductGroup.name,
+        func.count(func.distinct(TemuGroupMembership.product_id)),
+        func.count(func.distinct(TemuGroupMembership.product_id)).filter(
+            TemuProduct.cached_image_name.is_not(None), TemuProduct.image_status == "ready"
+        ),
+    ).outerjoin(TemuGroupMembership, TemuGroupMembership.group_id == TemuProductGroup.id)
+      .outerjoin(TemuProduct, TemuProduct.id == TemuGroupMembership.product_id)
+      .where(TemuProductGroup.owner_id == owner_id)
+      .group_by(TemuProductGroup.id, TemuProductGroup.owner_id, TemuProductGroup.name)
+      .order_by(TemuProductGroup.name.asc())).all()
+    for group_id, row_owner_id, name, product_count, ready_count in temu_rows:
+        processed = int(db.scalar(select(func.count(func.distinct(TemuImageEmbedding.product_id))).join(
+            TemuGroupMembership, TemuGroupMembership.product_id == TemuImageEmbedding.product_id
+        ).where(
+            TemuGroupMembership.group_id == group_id,
+            TemuImageEmbedding.config_id == config.id if config else False,
+        )) or 0)
+        result.append(SimilarityScopeGroupResponse(
+            id=group_id, owner_id=row_owner_id, platform="temu", name=name,
+            product_count=int(product_count), ready_product_count=int(ready_count),
+            processed_product_count=processed, pending_product_count=max(0, int(ready_count) - processed),
+        ))
+    return result
+
+
+@router.get("/admin/scope-preference", response_model=SimilarityScopePreferenceResponse)
+def get_scope_preference(
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityScopePreferenceResponse:
+    preference = db.get(SimilarityScopePreference, admin.id)
+    return SimilarityScopePreferenceResponse(
+        owner_id=preference.owner_id if preference else None,
+        group_ids=list(preference.product_group_ids or []) if preference else [],
+        temu_group_ids=list(preference.temu_group_ids or []) if preference else [],
+    )
+
+
+@router.put("/admin/scope-preference", response_model=SimilarityScopePreferenceResponse)
+def save_scope_preference(
+    payload: SimilarityScopeRequest,
+    admin: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SimilarityScopePreferenceResponse:
+    try:
+        scope_product_ids(db, payload.owner_id, payload.group_ids)
+        scope_temu_product_ids(db, payload.owner_id, payload.temu_group_ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    preference = db.get(SimilarityScopePreference, admin.id) or SimilarityScopePreference(admin_id=admin.id)
+    preference.owner_id = payload.owner_id
+    preference.product_group_ids = payload.group_ids
+    preference.temu_group_ids = payload.temu_group_ids
+    db.add(preference)
+    db.commit()
+    return SimilarityScopePreferenceResponse(
+        owner_id=preference.owner_id,
+        group_ids=list(preference.product_group_ids or []),
+        temu_group_ids=list(preference.temu_group_ids or []),
+    )
 
 
 @router.put("/admin/queue", response_model=SimilarityTaskStatsResponse)
@@ -418,6 +502,39 @@ async def test_config(
     )
 
 
+def candidate_product(db: Session, product: Product | TemuProduct) -> SimilarityCandidateProductResponse:
+    if isinstance(product, Product):
+        return SimilarityCandidateProductResponse(
+            platform="1688", id=product.id, external_id=product.offer_id, product_url=product.product_url,
+            image_url=f"/images/{product.cached_image_name}" if product.cached_image_name else None,
+            metric_label="总件数", metric_value=product.total_pieces,
+            sources=[SimilaritySourceResponse(**source) for source in product_sources(db, product.id)],
+        )
+    return SimilarityCandidateProductResponse(
+        platform="temu", id=product.id, external_id=product.temu_product_id, title=product.title,
+        product_url=product.product_url,
+        image_url=f"/images/{product.cached_image_name}" if product.cached_image_name else product.image_url,
+        metric_label="总销量", metric_value=product.total_sales,
+    )
+
+
+def candidate_response(db: Session, candidate_type: str, candidate) -> SimilarityCandidateResponse | None:
+    if candidate_type == "1688_same":
+        left, right = db.get(Product, candidate.left_product_id), db.get(Product, candidate.right_product_id)
+    elif candidate_type == "temu_same":
+        left, right = db.get(TemuProduct, candidate.left_product_id), db.get(TemuProduct, candidate.right_product_id)
+    else:
+        left, right = db.get(Product, candidate.product_id), db.get(TemuProduct, candidate.temu_product_id)
+    if not left or not right:
+        return None
+    return SimilarityCandidateResponse(
+        id=candidate.id, candidate_type=candidate_type,
+        left=candidate_product(db, left), right=candidate_product(db, right),
+        phash_distance=candidate.phash_distance, image_similarity=candidate.image_similarity,
+        status=candidate.status, created_at=candidate.created_at,
+    )
+
+
 @router.get("/admin/candidates", response_model=list[SimilarityCandidateResponse])
 def candidates(
     _: Annotated[AdminUser, Depends(require_admin)],
@@ -425,27 +542,20 @@ def candidates(
     candidate_status: str = Query(default="pending", alias="status"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SimilarityCandidateResponse]:
-    rows = db.scalars(
-        select(ProductSimilarityCandidate)
-        .where(ProductSimilarityCandidate.status == candidate_status)
-        .order_by(ProductSimilarityCandidate.image_similarity.desc().nullslast(), ProductSimilarityCandidate.id)
-        .limit(limit)
-    ).all()
-    result = []
-    for candidate in rows:
-        left = db.get(Product, candidate.left_product_id)
-        right = db.get(Product, candidate.right_product_id)
-        if left and right:
-            result.append(SimilarityCandidateResponse(
-                id=candidate.id,
-                left=similarity_product(db, left),
-                right=similarity_product(db, right),
-                phash_distance=candidate.phash_distance,
-                image_similarity=candidate.image_similarity,
-                status=candidate.status,
-                created_at=candidate.created_at,
-            ))
-    return result
+    combined = []
+    for candidate_type, model in (
+        ("1688_same", ProductSimilarityCandidate),
+        ("temu_same", TemuSimilarityCandidate),
+        ("cross_platform", CrossPlatformSimilarityCandidate),
+    ):
+        for candidate in db.scalars(select(model).where(model.status == candidate_status).order_by(
+            model.image_similarity.desc().nullslast(), model.id
+        ).limit(limit)).all():
+            response = candidate_response(db, candidate_type, candidate)
+            if response:
+                combined.append(response)
+    combined.sort(key=lambda item: item.image_similarity or -2, reverse=True)
+    return combined[:limit]
 
 
 def apply_candidate_decision(
@@ -478,62 +588,86 @@ def apply_candidate_decision(
     ))
 
 
+def apply_typed_candidate_decision(db: Session, candidate_type: str, candidate_id: int, decision: str, admin_id: int) -> None:
+    model = {
+        "1688_same": ProductSimilarityCandidate,
+        "temu_same": TemuSimilarityCandidate,
+        "cross_platform": CrossPlatformSimilarityCandidate,
+    }[candidate_type]
+    candidate = db.get(model, candidate_id)
+    if not candidate:
+        raise HTTPException(status_code=404, detail="候选记录不存在")
+    if candidate.status != "pending":
+        raise HTTPException(status_code=409, detail="候选已审批")
+    candidate.reviewed_by = admin_id
+    candidate.reviewed_at = datetime.now(timezone.utc)
+    candidate.decision_source = "manual"
+    candidate.status = "approved" if decision == "approve" else "rejected"
+    if decision == "approve" and candidate_type == "1688_same":
+        merge_products(db, candidate.left_product_id, candidate.right_product_id, "manual", candidate.image_similarity,
+                       actor_id=admin_id, candidate_id=candidate.id)
+    elif decision == "approve" and candidate_type == "temu_same":
+        merge_temu_products(db, candidate.left_product_id, candidate.right_product_id, candidate.image_similarity,
+                            admin_id, candidate.id)
+    elif decision == "approve":
+        relation = db.scalar(select(CrossPlatformProductRelation).where(
+            CrossPlatformProductRelation.product_id == candidate.product_id,
+            CrossPlatformProductRelation.temu_product_id == candidate.temu_product_id,
+        )) or CrossPlatformProductRelation(
+            product_id=candidate.product_id, temu_product_id=candidate.temu_product_id
+        )
+        relation.confidence = candidate.image_similarity
+        relation.confirmed_by = admin_id
+        relation.candidate_id = candidate.id
+        db.add(relation)
+        db.add(SimilarityAuditLog(
+            action="link", actor_id=admin_id, candidate_type="cross_platform", external_candidate_id=candidate.id,
+            payload={"product_id": candidate.product_id, "temu_product_id": candidate.temu_product_id},
+        ))
+    elif candidate_type != "1688_same":
+        db.add(SimilarityAuditLog(
+            action="reject", actor_id=admin_id, candidate_type=candidate_type, external_candidate_id=candidate.id,
+        ))
+    else:
+        db.add(SimilarityAuditLog(
+            action="reject", actor_id=admin_id, candidate_id=candidate.id, candidate_type="1688_same",
+        ))
+
+
 @router.post("/admin/candidates/batch-decision", response_model=SimilarityBatchDecisionResponse)
 def decide_candidates_batch(
     payload: SimilarityBatchDecisionRequest,
     admin: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> SimilarityBatchDecisionResponse:
-    candidates = list(db.scalars(
-        select(ProductSimilarityCandidate)
-        .where(ProductSimilarityCandidate.id.in_(payload.candidate_ids))
-        .order_by(ProductSimilarityCandidate.id)
-        .with_for_update()
-    ))
-    if len(candidates) != len(payload.candidate_ids):
-        raise HTTPException(status_code=404, detail="部分候选记录不存在")
-    invalid_ids = [candidate.id for candidate in candidates if candidate.status != "pending"]
-    if invalid_ids:
-        raise HTTPException(
-            status_code=409,
-            detail=f"部分候选已审批，请刷新后重试：{invalid_ids}",
-        )
     try:
-        for candidate in candidates:
-            apply_candidate_decision(db, candidate, payload.decision, admin.id)
+        for typed_id in payload.candidate_ids:
+            candidate_type, candidate_id = typed_id.split(":", 1)
+            apply_typed_candidate_decision(db, candidate_type, int(candidate_id), payload.decision, admin.id)
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return SimilarityBatchDecisionResponse(
-        decision=payload.decision,
-        processed=len(candidates),
-    )
+    return SimilarityBatchDecisionResponse(decision=payload.decision, processed=len(payload.candidate_ids))
 
 
-@router.post("/admin/candidates/{candidate_id}/decision", response_model=SimilarityCandidateResponse)
+@router.post("/admin/candidates/{candidate_type}/{candidate_id}/decision", response_model=SimilarityCandidateResponse)
 def decide_candidate(
+    candidate_type: Literal["1688_same", "temu_same", "cross_platform"],
     candidate_id: int,
     payload: SimilarityDecisionRequest,
     admin: Annotated[AdminUser, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> SimilarityCandidateResponse:
-    candidate = db.get(ProductSimilarityCandidate, candidate_id)
-    if not candidate:
-        raise HTTPException(status_code=404, detail="候选记录不存在")
-    apply_candidate_decision(db, candidate, payload.decision, admin.id)
+    apply_typed_candidate_decision(db, candidate_type, candidate_id, payload.decision, admin.id)
+    model = {
+        "1688_same": ProductSimilarityCandidate,
+        "temu_same": TemuSimilarityCandidate,
+        "cross_platform": CrossPlatformSimilarityCandidate,
+    }[candidate_type]
+    candidate = db.get(model, candidate_id)
     db.commit()
-    left = db.get(Product, candidate.left_product_id)
-    right = db.get(Product, candidate.right_product_id)
-    return SimilarityCandidateResponse(
-        id=candidate.id,
-        left=similarity_product(db, left),
-        right=similarity_product(db, right),
-        phash_distance=candidate.phash_distance,
-        image_similarity=candidate.image_similarity,
-        status=candidate.status,
-        created_at=candidate.created_at,
-    )
+    return candidate_response(db, candidate_type, candidate)
 
 
 @router.get("/clusters/{cluster_id}", response_model=SimilarityClusterResponse)

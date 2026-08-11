@@ -326,6 +326,7 @@ onMounted(loadGroups);
           <thead>
             <tr>
               <th>主图</th>
+              <th>平台同款</th>
               <th @click="toggleSort('temu_product_id')">
                 商品 ID{{ sortMark("temu_product_id") }}
               </th>
@@ -361,6 +362,12 @@ onMounted(loadGroups);
                   loading="lazy"
                 />
                 <div v-else class="image-placeholder">暂无图片</div>
+              </td>
+              <td>
+                <span v-if="product.cluster_id" class="cluster-badge"
+                  >{{ product.cluster_member_count }} 件</span
+                >
+                <span v-else class="single-badge">单品</span>
               </td>
               <td>
                 <a :href="product.product_url" target="_blank">{{
@@ -458,6 +465,81 @@ onMounted(loadGroups);
             <span>标签</span>
             <strong>{{ detail.temu_tags || "-" }}</strong>
           </div>
+          <h3>平台同款</h3>
+          <div
+            v-if="detail.platform_same_products?.length"
+            class="table-wrap detail-history-wrap"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th>主图</th>
+                  <th>Temu 商品</th>
+                  <th>售价</th>
+                  <th>日销量</th>
+                  <th>总销量</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="item in detail.platform_same_products"
+                  :key="item.id"
+                >
+                  <td>
+                    <img
+                      v-if="item.image_url"
+                      :src="item.image_url"
+                      class="product-image"
+                    />
+                  </td>
+                  <td>
+                    <a :href="item.product_url" target="_blank">{{
+                      item.temu_product_id
+                    }}</a>
+                  </td>
+                  <td>${{ number(item.sale_price) }}</td>
+                  <td>{{ number(item.daily_sales, 0) }}</td>
+                  <td>{{ number(item.total_sales, 0) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="empty">暂无已确认的 Temu 平台同款</p>
+          <h3>显示货源 · 1688</h3>
+          <div
+            v-if="detail.source_products?.length"
+            class="table-wrap detail-history-wrap"
+          >
+            <table>
+              <thead>
+                <tr>
+                  <th>主图</th>
+                  <th>1688 商品</th>
+                  <th>每日笔数</th>
+                  <th>总件数</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in detail.source_products" :key="item.id">
+                  <td>
+                    <img
+                      v-if="item.image_url"
+                      :src="item.image_url"
+                      class="product-image"
+                    />
+                  </td>
+                  <td>
+                    <a :href="item.product_url" target="_blank">{{
+                      item.offer_id
+                    }}</a>
+                  </td>
+                  <td>{{ number(item.daily_orders, 4) }}</td>
+                  <td>{{ number(item.total_pieces, 0) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="empty">暂无已确认的 1688 货源</p>
           <h3>个人采集历史</h3>
           <div class="table-wrap detail-history-wrap">
             <table>

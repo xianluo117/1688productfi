@@ -68,10 +68,10 @@ def test_embedding_config_trims_api_key_whitespace():
 
 def test_batch_decision_request_deduplicates_candidate_ids():
     payload = SimilarityBatchDecisionRequest(
-        candidate_ids=[3, 1, 3, 2],
+        candidate_ids=["1688_same:3", "temu_same:1", "1688_same:3", "cross_platform:2"],
         decision="approve",
     )
-    assert payload.candidate_ids == [3, 1, 2]
+    assert payload.candidate_ids == ["1688_same:3", "temu_same:1", "cross_platform:2"]
     assert payload.decision == "approve"
 
 

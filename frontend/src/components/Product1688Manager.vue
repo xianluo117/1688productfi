@@ -448,6 +448,43 @@ onMounted(loadGroups);
           <dt>所属分组</dt>
           <dd>{{ detail.groups.map((group) => group.name).join("、") }}</dd>
         </dl>
+        <h3>平台数据 · Temu</h3>
+        <div
+          v-if="detail.platform_products?.length"
+          class="table-wrap detail-history-wrap"
+        >
+          <table>
+            <thead>
+              <tr>
+                <th>主图</th>
+                <th>Temu 商品</th>
+                <th>售价</th>
+                <th>日销量</th>
+                <th>总销量</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in detail.platform_products" :key="item.id">
+                <td>
+                  <img
+                    v-if="item.image_url"
+                    :src="item.image_url"
+                    class="product-image"
+                  />
+                </td>
+                <td>
+                  <a :href="item.product_url" target="_blank">{{
+                    item.temu_product_id
+                  }}</a>
+                </td>
+                <td>${{ formatNumber(item.sale_price, 2) }}</td>
+                <td>{{ formatNumber(item.daily_sales, 0) }}</td>
+                <td>{{ formatNumber(item.total_sales, 0) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="empty">暂无已确认的 Temu 平台产品</p>
       </section>
     </div>
   </div>

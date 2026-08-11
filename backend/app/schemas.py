@@ -229,10 +229,23 @@ class SimilarityProductResponse(ProductListItem):
     sources: list[SimilaritySourceResponse] = Field(default_factory=list)
 
 
+class SimilarityCandidateProductResponse(BaseModel):
+    platform: Literal["1688", "temu"]
+    id: int
+    external_id: str
+    title: str | None = None
+    product_url: str
+    image_url: str | None
+    metric_label: str
+    metric_value: Decimal | int
+    sources: list[SimilaritySourceResponse] = Field(default_factory=list)
+
+
 class SimilarityCandidateResponse(BaseModel):
     id: int
-    left: SimilarityProductResponse
-    right: SimilarityProductResponse
+    candidate_type: Literal["1688_same", "temu_same", "cross_platform"]
+    left: SimilarityCandidateProductResponse
+    right: SimilarityCandidateProductResponse
     phash_distance: int | None
     image_similarity: float | None
     status: str
@@ -244,13 +257,19 @@ class SimilarityDecisionRequest(BaseModel):
 
 
 class SimilarityBatchDecisionRequest(SimilarityDecisionRequest):
-    candidate_ids: list[int] = Field(min_length=1, max_length=200)
+    candidate_ids: list[str] = Field(min_length=1, max_length=200)
 
     @field_validator("candidate_ids")
     @classmethod
-    def unique_candidate_ids(cls, value: list[int]) -> list[int]:
-        if any(candidate_id <= 0 for candidate_id in value):
-            raise ValueError("candidate IDs must be positive")
+    def unique_candidate_ids(cls, value: list[str]) -> list[str]:
+        allowed = {"1688_same", "temu_same", "cross_platform"}
+        for candidate_id in value:
+            try:
+                candidate_type, numeric_id = candidate_id.split(":", 1)
+            except ValueError as error:
+                raise ValueError("candidate ID must include its type") from error
+            if candidate_type not in allowed or not numeric_id.isdigit() or int(numeric_id) <= 0:
+                raise ValueError("invalid candidate ID")
         return list(dict.fromkeys(value))
 
 
@@ -273,8 +292,9 @@ class SimilarityQueueUpdate(BaseModel):
 class SimilarityScopeRequest(BaseModel):
     owner_id: int | None = Field(default=None, gt=0)
     group_ids: list[int] = Field(default_factory=list)
+    temu_group_ids: list[int] = Field(default_factory=list)
 
-    @field_validator("group_ids")
+    @field_validator("group_ids", "temu_group_ids")
     @classmethod
     def unique_group_ids(cls, value: list[int]) -> list[int]:
         if any(group_id <= 0 for group_id in value):
@@ -285,9 +305,18 @@ class SimilarityScopeRequest(BaseModel):
 class SimilarityScopeGroupResponse(BaseModel):
     id: int
     owner_id: int
+    platform: Literal["1688", "temu"]
     name: str
     product_count: int
     ready_product_count: int
+    processed_product_count: int = 0
+    pending_product_count: int = 0
+
+
+class SimilarityScopePreferenceResponse(BaseModel):
+    owner_id: int | None
+    group_ids: list[int]
+    temu_group_ids: list[int]
 
 
 class SimilarityTaskResponse(BaseModel):
@@ -373,6 +402,7 @@ class ProductDetail(ProductListItem):
     image_status: str
     groups: list[GroupResponse]
     snapshots: list[SnapshotResponse]
+    platform_products: list["TemuProductListItem"] = Field(default_factory=list)
 
 
 class TemuGroupUpdate(BaseModel):
@@ -472,6 +502,8 @@ class TemuProductListItem(BaseModel):
     is_ad: bool
     delivery_tip: str | None
     last_collected_at: datetime
+    cluster_id: int | None = None
+    cluster_member_count: int = 1
 
 
 class TemuProductPage(BaseModel):
@@ -509,3 +541,5 @@ class TemuSnapshotResponse(BaseModel):
 class TemuProductDetail(TemuProductListItem):
     groups: list[TemuGroupResponse]
     snapshots: list[TemuSnapshotResponse]
+    platform_same_products: list[TemuProductListItem] = Field(default_factory=list)
+    source_products: list[ProductListItem] = Field(default_factory=list)

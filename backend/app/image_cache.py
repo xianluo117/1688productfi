@@ -1,6 +1,7 @@
 import ipaddress
 import mimetypes
 import socket
+import hashlib
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -28,7 +29,7 @@ def validate_public_image_url(url: str) -> None:
             raise ValueError("image URL resolves to a non-public address")
 
 
-async def cache_product_image(offer_id: str, image_url: str, settings: Settings) -> str:
+async def cache_product_image(offer_id: str, image_url: str, settings: Settings, namespace: str = "1688") -> str:
     validate_public_image_url(image_url)
     settings.image_storage_path.mkdir(parents=True, exist_ok=True)
 
@@ -52,7 +53,9 @@ async def cache_product_image(offer_id: str, image_url: str, settings: Settings)
             if extension not in ALLOWED_IMAGE_TYPES.values():
                 raise ValueError("unsupported image content type")
 
-            filename = f"{offer_id}{extension}"
+            safe_namespace = "".join(character for character in namespace if character.isalnum() or character in {"-", "_"})
+            url_version = hashlib.sha256(image_url.encode("utf-8")).hexdigest()[:12]
+            filename = f"{safe_namespace}-{offer_id}-{url_version}{extension}"
             target = settings.image_storage_path / filename
             temporary = Path(f"{target}.tmp")
             size = 0

@@ -4,19 +4,24 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import get_current_user, get_ingest_user
-from .database import get_db
+from .config import get_settings
+from .database import SessionLocal, get_db
+from .image_cache import cache_product_image
 from .models import (
     AdminUser,
+    CrossPlatformProductRelation,
+    Product,
     TemuGroupMembership,
     TemuProduct,
     TemuProductGroup,
     TemuProductSnapshot,
+    TemuSimilarityClusterMember,
 )
 from .schemas import (
     GroupCreate,
@@ -37,8 +42,11 @@ from .temu_services import (
     list_temu_group_products,
     temu_product_to_item,
 )
+from .services import product_to_item
+from .similarity_services import enqueue_temu_product, queue_control
 
 router = APIRouter(prefix="/api/temu", tags=["temu"])
+settings = get_settings()
 
 
 def resolve_owner_id(current_user: AdminUser, requested_owner_id: int | None) -> int:
@@ -144,14 +152,42 @@ def ensure_ingest_group(
     return group
 
 
+async def cache_temu_image_task(product_id: int, image_url: str) -> None:
+    try:
+        with SessionLocal() as db:
+            product = db.get(TemuProduct, product_id)
+            if not product:
+                return
+            filename = await cache_product_image(product.temu_product_id, image_url, settings, namespace="temu")
+            image_changed = filename != product.cached_image_name
+            product.cached_image_name = filename
+            product.image_status = "ready"
+            if image_changed:
+                product.image_content_hash = None
+                product.image_phash = None
+                product.similarity_status = "pending"
+            if queue_control(db).auto_vectorization_enabled:
+                enqueue_temu_product(db, product)
+            else:
+                product.similarity_status = "disabled"
+            db.commit()
+    except Exception:
+        with SessionLocal() as db:
+            product = db.get(TemuProduct, product_id)
+            if product:
+                product.image_status = "failed"
+                db.commit()
+
+
 @router.post("/ingest/batches", response_model=IngestBatchResponse)
 def create_ingest_batch(
     payload: TemuIngestBatchRequest,
+    background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
     ingest_user: Annotated[AdminUser, Depends(get_ingest_user)],
 ) -> IngestBatchResponse:
     try:
-        batch, duplicate = ingest_temu_batch(db, ingest_user, payload)
+        batch, duplicate, images = ingest_temu_batch(db, ingest_user, payload)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Temu 分组不存在或不属于当前令牌用户") from exc
     except ValueError as exc:
@@ -160,6 +196,8 @@ def create_ingest_batch(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="Temu 上传冲突，请使用相同幂等键重试") from exc
+    for product_id, image_url in images:
+        background_tasks.add_task(cache_temu_image_task, product_id, image_url)
     return IngestBatchResponse(batch_id=batch.id, accepted=batch.item_count, duplicate=duplicate)
 
 
@@ -258,9 +296,25 @@ def product_detail(
         .order_by(TemuProductSnapshot.collected_at.desc())
         .limit(100)
     ))
+    cluster_member = db.scalar(select(TemuSimilarityClusterMember).where(
+        TemuSimilarityClusterMember.product_id == product.id
+    ))
+    same_products: list[TemuProduct] = []
+    if cluster_member:
+        same_products = list(db.scalars(select(TemuProduct).join(
+            TemuSimilarityClusterMember, TemuSimilarityClusterMember.product_id == TemuProduct.id
+        ).where(
+            TemuSimilarityClusterMember.cluster_id == cluster_member.cluster_id,
+            TemuProduct.id != product.id,
+        ).order_by(TemuProduct.total_sales.desc())))
+    source_products = list(db.scalars(select(Product).join(
+        CrossPlatformProductRelation, CrossPlatformProductRelation.product_id == Product.id
+    ).where(CrossPlatformProductRelation.temu_product_id == product.id).order_by(Product.total_pieces.desc())))
     item = temu_product_to_item(product)
     return TemuProductDetail(
         **item.model_dump(),
         groups=[TemuGroupResponse.model_validate(group) for group in groups],
         snapshots=[TemuSnapshotResponse.model_validate(snapshot) for snapshot in snapshots],
+        platform_same_products=[temu_product_to_item(item) for item in same_products],
+        source_products=[product_to_item(item) for item in source_products],
     )

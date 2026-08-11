@@ -92,12 +92,13 @@ def test_temu_batch_duplicate_product_id_uses_last_value():
     with create_session() as db:
         user = create_user(db, "dedupe-temu")
         group, _ = get_or_create_temu_group(db, user.id, "A")
-        created, duplicate = ingest_temu_batch(
+        created, duplicate, images = ingest_temu_batch(
             db,
             user,
             batch(group.id, "temu-dedupe-key", [incoming("602", 1), incoming("602", 8)]),
         )
         assert duplicate is False
+        assert len(images) == 1
         assert created.item_count == 1
         product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "602"))
         assert product.daily_sales == 8
