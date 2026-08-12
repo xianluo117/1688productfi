@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
@@ -21,6 +23,21 @@ from .similarity_services import decrypt_api_key, encrypt_api_key, mask_api_key
 from .temu_image_download_services import scope_temu_products
 
 
+def normalize_result_image_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    url = value.strip().replace("\\/", "/")
+    if not url:
+        return None
+    if url.startswith("//"):
+        return f"https:{url}"
+    if url.startswith("http://"):
+        return f"https://{url[7:]}"
+    if url.startswith("https://"):
+        return url
+    return None
+
+
 def image_search_config(db: Session, create: bool = True) -> TemuImageSearchConfig | None:
     config = db.get(TemuImageSearchConfig, 1)
     if config is None and create:
@@ -38,7 +55,10 @@ def config_payload(config: TemuImageSearchConfig, settings: Settings) -> dict[st
         "base_url": config.base_url,
         "api_key_masked": mask_api_key(api_key),
         "api_key_configured": bool(api_key),
+        "public_image_base_url": config.public_image_base_url,
         "auto_search_enabled": config.auto_search_enabled,
+        "queue_state": config.queue_state,
+        "concurrency": config.concurrency,
         "timeout_seconds": config.timeout_seconds,
         "poll_interval_seconds": config.poll_interval_seconds,
         "task_timeout_seconds": config.task_timeout_seconds,
@@ -52,7 +72,9 @@ def update_image_search_config(
     *,
     base_url: str,
     api_key: str | None,
+    public_image_base_url: str | None,
     auto_search_enabled: bool,
+    concurrency: int,
     timeout_seconds: int,
     poll_interval_seconds: int,
     task_timeout_seconds: int,
@@ -62,7 +84,11 @@ def update_image_search_config(
     config.base_url = base_url.rstrip("/")
     if api_key is not None:
         config.api_key_encrypted = encrypt_api_key(api_key, settings)
+    config.public_image_base_url = (
+        public_image_base_url.rstrip("/") if public_image_base_url else None
+    )
     config.auto_search_enabled = auto_search_enabled
+    config.concurrency = concurrency
     config.timeout_seconds = timeout_seconds
     config.poll_interval_seconds = poll_interval_seconds
     config.task_timeout_seconds = task_timeout_seconds
@@ -76,7 +102,11 @@ def reset_image_search_task(task: TemuImageSearchTask, *, source: str | None = N
     if source:
         task.source = source
     task.status = "pending"
-    task.remote_task_id = None
+    task.remote_stage = None
+    task.upload_task_id = None
+    task.product_task_id = None
+    task.request_image_url = None
+    task.request_image_source = None
     task.attempts = 0
     task.last_error_code = None
     task.last_error = None
@@ -144,7 +174,60 @@ def enqueue_temu_image_search_scope(
     return count
 
 
+def resolve_search_image_url(
+    product: TemuProduct,
+    config: TemuImageSearchConfig,
+    image_storage_path: Path,
+) -> tuple[str, str]:
+    cached_name = product.cached_image_name
+    if (
+        config.public_image_base_url
+        and cached_name
+        and Path(cached_name).name == cached_name
+        and (image_storage_path / cached_name).is_file()
+    ):
+        public_url = (
+            f"{config.public_image_base_url.rstrip('/')}/images/"
+            f"{quote(cached_name, safe='')}"
+        )
+        return public_url, "cache"
+    if not product.image_url:
+        raise ValueError("Temu 商品没有可用图片 URL")
+    return normalize_temu_image_url(product.image_url), "temu"
+
+
+def set_image_search_queue_state(
+    db: Session,
+    state: str,
+) -> tuple[TemuImageSearchConfig, int]:
+    if state not in {"running", "paused", "stopped"}:
+        raise ValueError("图搜队列状态无效")
+    config = image_search_config(db)
+    config.queue_state = state
+    config.queue_revision += 1
+    interrupted = 0
+    if state in {"paused", "stopped"}:
+        tasks = list(
+            db.scalars(
+                select(TemuImageSearchTask).where(
+                    TemuImageSearchTask.status == "processing"
+                )
+            )
+        )
+        interrupted = len(tasks)
+        for task in tasks:
+            task.status = "pending"
+            task.locked_at = None
+            task.available_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(config)
+    return config, interrupted
+
+
 def claim_temu_image_search(db: Session) -> TemuImageSearchTask | None:
+    config = image_search_config(db)
+    if config.queue_state != "running":
+        return None
     now = datetime.now(timezone.utc)
     stale = now - timedelta(minutes=10)
     task = db.scalar(
@@ -202,7 +285,9 @@ def replace_image_search_result(
             TemuImageSearchResultItem(
                 result_id=result.id,
                 rank=rank,
-                image_url=item.get("image"),
+                image_url=normalize_result_image_url(
+                    item.get("image") or item.get("image_url")
+                ),
                 title=item.get("title"),
                 price=str(item["price"]) if item.get("price") is not None else None,
                 sale_quantity=(

@@ -19,7 +19,10 @@ const config = reactive({
   api_key: "",
   api_key_masked: "",
   api_key_configured: false,
+  public_image_base_url: "",
   auto_search_enabled: false,
+  queue_state: "running",
+  concurrency: 4,
   timeout_seconds: 30,
   poll_interval_seconds: 2,
   task_timeout_seconds: 180,
@@ -56,7 +59,9 @@ async function saveConfig() {
     const payload = {
       base_url: config.base_url,
       api_key: config.api_key || null,
+      public_image_base_url: config.public_image_base_url || null,
       auto_search_enabled: config.auto_search_enabled,
+      concurrency: Number(config.concurrency),
       timeout_seconds: Number(config.timeout_seconds),
       poll_interval_seconds: Number(config.poll_interval_seconds),
       task_timeout_seconds: Number(config.task_timeout_seconds),
@@ -68,6 +73,19 @@ async function saveConfig() {
     Object.assign(config, result, { api_key: "" });
   } finally {
     saving.value = false;
+  }
+}
+
+async function controlQueue(action) {
+  busy.value = true;
+  try {
+    const result = await api(`/api/temu-image-search/admin/queue/${action}`, {
+      method: "POST",
+    });
+    config.queue_state = result.queue_state;
+    await refresh();
+  } finally {
+    busy.value = false;
   }
 }
 
@@ -223,6 +241,14 @@ onUnmounted(() => window.clearInterval(timer));
             v-model.trim="config.base_url"
             placeholder="https://search.example.com"
         /></label>
+        <label class="wide"
+          >缓存图片公开域名<input
+            v-model.trim="config.public_image_base_url"
+            placeholder="https://products.example.com"
+          /><small
+            >外部图搜将优先使用此域名下的 /images/缓存文件名</small
+          ></label
+        >
         <label
           >API Key<input
             v-model.trim="config.api_key"
@@ -235,6 +261,13 @@ onUnmounted(() => window.clearInterval(timer));
             type="checkbox"
           />图片就绪后自动图搜</label
         >
+        <label
+          >并发数<input
+            v-model.number="config.concurrency"
+            type="number"
+            min="1"
+            max="20"
+        /></label>
         <label
           >HTTP 超时（秒）<input
             v-model.number="config.timeout_seconds"
@@ -256,6 +289,34 @@ onUnmounted(() => window.clearInterval(timer));
             min="30"
             max="600"
         /></label>
+      </div>
+      <div class="section-heading queue-control-heading">
+        <div>
+          <h3>队列状态：{{ config.queue_state }}</h3>
+          <p>暂停保留远程任务断点；停止清除断点，继续后重新创建远程任务。</p>
+        </div>
+        <div class="inline-actions">
+          <button
+            :disabled="busy || config.queue_state === 'running'"
+            @click="controlQueue('resume')"
+          >
+            继续
+          </button>
+          <button
+            class="secondary"
+            :disabled="busy || config.queue_state === 'paused'"
+            @click="controlQueue('pause')"
+          >
+            暂停
+          </button>
+          <button
+            class="danger"
+            :disabled="busy || config.queue_state === 'stopped'"
+            @click="controlQueue('stop')"
+          >
+            停止
+          </button>
+        </div>
       </div>
       <p class="health-line" :class="health.status">
         服务状态：{{ health.status }}
@@ -343,7 +404,9 @@ onUnmounted(() => window.clearInterval(timer));
       <div class="section-heading">
         <div>
           <h2>实时图搜日志</h2>
-          <p>每 3 秒刷新，保存远程任务 ID、错误码和完整错误信息。</p>
+          <p>
+            每 3 秒刷新，保存上传/商品任务 ID、远程阶段、错误码和完整错误信息。
+          </p>
         </div>
         <button
           class="secondary"
@@ -381,7 +444,10 @@ onUnmounted(() => window.clearInterval(timer));
               <th>用户/分组</th>
               <th>来源</th>
               <th>状态</th>
-              <th>远程任务</th>
+              <th>提交图片</th>
+              <th>远程阶段</th>
+              <th>上传任务</th>
+              <th>商品任务</th>
               <th>尝试</th>
               <th>错误</th>
               <th>操作</th>
@@ -403,7 +469,25 @@ onUnmounted(() => window.clearInterval(timer));
                   statusText(task.status)
                 }}</span>
               </td>
-              <td class="remote-task-cell">{{ task.remote_task_id || "-" }}</td>
+              <td class="remote-task-cell">
+                <a
+                  v-if="task.request_image_url"
+                  :href="task.request_image_url"
+                  target="_blank"
+                  rel="noopener"
+                  >{{
+                    task.request_image_source === "cache"
+                      ? "本地缓存"
+                      : "Temu 原图"
+                  }}</a
+                >
+                <span v-else>-</span>
+              </td>
+              <td>{{ task.remote_stage || "-" }}</td>
+              <td class="remote-task-cell">{{ task.upload_task_id || "-" }}</td>
+              <td class="remote-task-cell">
+                {{ task.product_task_id || "-" }}
+              </td>
               <td>{{ task.attempts }}</td>
               <td class="error-cell" :title="task.last_error || ''">
                 <b v-if="task.last_error_code">{{ task.last_error_code }}</b
@@ -420,7 +504,7 @@ onUnmounted(() => window.clearInterval(timer));
               </td>
             </tr>
             <tr v-if="!tasks.length">
-              <td colspan="9" class="empty">暂无图搜任务</td>
+              <td colspan="12" class="empty">暂无图搜任务</td>
             </tr>
           </tbody>
         </table>

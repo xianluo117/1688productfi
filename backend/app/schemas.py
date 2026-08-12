@@ -364,10 +364,19 @@ class SimilarityConnectionTestResponse(BaseModel):
 class TemuImageSearchConfigUpsert(BaseModel):
     base_url: HttpUrl
     api_key: str | None = Field(default=None, min_length=1, max_length=500)
+    public_image_base_url: HttpUrl | None = None
     auto_search_enabled: bool = False
+    concurrency: int = Field(default=4, ge=1, le=20)
     timeout_seconds: int = Field(default=30, ge=5, le=120)
     poll_interval_seconds: int = Field(default=2, ge=1, le=10)
     task_timeout_seconds: int = Field(default=180, ge=30, le=600)
+
+    @field_validator("public_image_base_url")
+    @classmethod
+    def require_https_image_base_url(cls, value: HttpUrl | None) -> HttpUrl | None:
+        if value is not None and value.scheme != "https":
+            raise ValueError("缓存图片公开域名必须使用 HTTPS")
+        return value
 
     @field_validator("api_key")
     @classmethod
@@ -383,11 +392,19 @@ class TemuImageSearchConfigResponse(BaseModel):
     base_url: str
     api_key_masked: str | None
     api_key_configured: bool
+    public_image_base_url: str | None
     auto_search_enabled: bool
+    queue_state: Literal["running", "paused", "stopped"]
+    concurrency: int
     timeout_seconds: int
     poll_interval_seconds: int
     task_timeout_seconds: int
     updated_at: datetime
+
+
+class TemuImageSearchQueueResponse(BaseModel):
+    queue_state: Literal["running", "paused", "stopped"]
+    interrupted_tasks: int = 0
 
 
 class TemuImageSearchHealthResponse(BaseModel):
@@ -432,9 +449,13 @@ class TemuImageSearchTaskResponse(BaseModel):
     group_id: int | None
     group_name: str | None
     image_url: str
+    request_image_url: str | None
+    request_image_source: str | None
     source: str
     status: str
-    remote_task_id: str | None
+    remote_stage: str | None
+    upload_task_id: str | None
+    product_task_id: str | None
     attempts: int
     last_error_code: str | None
     last_error: str | None

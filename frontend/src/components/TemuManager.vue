@@ -23,6 +23,7 @@ const loading = ref(false);
 const newGroupName = ref("");
 const sort = reactive({ field: "daily_sales", direction: "desc" });
 const showMoreImageSearch = ref(false);
+const brokenImageSearchUrls = ref(new Set());
 const filters = reactive({
   search: "",
   daily_sales_min: "",
@@ -161,6 +162,15 @@ function number(value, digits = 2) {
   return Number(value).toLocaleString("zh-CN", {
     maximumFractionDigits: digits,
   });
+}
+
+function imageSearchImageVisible(url) {
+  return Boolean(url) && !brokenImageSearchUrls.value.has(url);
+}
+
+function markImageSearchBroken(url) {
+  if (!url) return;
+  brokenImageSearchUrls.value = new Set([...brokenImageSearchUrls.value, url]);
 }
 
 async function showDetail(product) {
@@ -375,23 +385,56 @@ onMounted(loadGroups);
               </td>
               <td class="image-search-top1-cell">
                 <a
-                  v-if="product.image_search?.top1?.image_url"
-                  :href="product.image_search.top1.product_url || product.image_search.search_page_url"
+                  v-if="
+                    imageSearchImageVisible(
+                      product.image_search?.top1?.image_url,
+                    )
+                  "
+                  :href="
+                    product.image_search.top1.product_url ||
+                    product.image_search.search_page_url
+                  "
                   target="_blank"
                   rel="noopener noreferrer"
-                  :title="product.image_search.top1.title || '打开 1688 图搜结果'"
+                  :title="
+                    product.image_search.top1.title || '打开 1688 图搜结果'
+                  "
                 >
                   <img
                     :src="product.image_search.top1.image_url"
                     class="product-image image-search-image"
                     loading="lazy"
+                    referrerpolicy="no-referrer"
+                    @error="
+                      markImageSearchBroken(product.image_search.top1.image_url)
+                    "
                   />
                 </a>
+                <a
+                  v-else-if="product.image_search?.top1"
+                  :href="
+                    product.image_search.top1.product_url ||
+                    product.image_search.search_page_url
+                  "
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="image-search-fallback"
+                  >Top 1</a
+                >
                 <span
-                  v-else-if="['pending', 'processing'].includes(product.image_search?.status)"
+                  v-else-if="
+                    ['pending', 'processing'].includes(
+                      product.image_search?.status,
+                    )
+                  "
                   class="status-badge processing"
-                >搜索中</span>
-                <span v-else-if="product.image_search?.status === 'failed'" class="status-badge failed">失败</span>
+                  >搜索中</span
+                >
+                <span
+                  v-else-if="product.image_search?.status === 'failed'"
+                  class="status-badge failed"
+                  >失败</span
+                >
                 <span v-else class="muted">暂无结果</span>
               </td>
               <td>
@@ -494,8 +537,15 @@ onMounted(loadGroups);
             <div class="section-heading">
               <div>
                 <h3>以图找图结果 · 1688</h3>
-                <p v-if="detail.image_search?.found !== null && detail.image_search?.found !== undefined">
-                  共找到 {{ number(detail.image_search.found, 0) }} 条结果，系统保存排序最前的 3 条。
+                <p
+                  v-if="
+                    detail.image_search?.found !== null &&
+                    detail.image_search?.found !== undefined
+                  "
+                >
+                  共找到
+                  {{ number(detail.image_search.found, 0) }}
+                  条结果，系统保存排序最前的 3 条。
                 </p>
               </div>
               <a
@@ -504,33 +554,50 @@ onMounted(loadGroups);
                 target="_blank"
                 rel="noopener noreferrer"
                 class="button-link"
-              >打开 1688 官方图搜页</a>
+                >打开 1688 官方图搜页</a
+              >
             </div>
             <div
               v-if="detail.image_search?.top1"
               class="image-search-primary-card"
             >
               <img
-                v-if="detail.image_search.top1.image_url"
+                v-if="
+                  imageSearchImageVisible(detail.image_search.top1.image_url)
+                "
                 :src="detail.image_search.top1.image_url"
                 class="image-search-primary-image"
+                referrerpolicy="no-referrer"
+                @error="
+                  markImageSearchBroken(detail.image_search.top1.image_url)
+                "
               />
+              <div v-else class="image-search-primary-image image-placeholder">
+                图片加载失败
+              </div>
               <div>
                 <span class="cluster-badge">Top 1</span>
-                <strong>{{ detail.image_search.top1.title || "1688 图搜商品" }}</strong>
+                <strong>{{
+                  detail.image_search.top1.title || "1688 图搜商品"
+                }}</strong>
                 <p>
-                  价格：{{ detail.image_search.top1.price || "-" }} · 销量：{{ detail.image_search.top1.sale_quantity || "-" }}
+                  价格：{{ detail.image_search.top1.price || "-" }} · 销量：{{
+                    detail.image_search.top1.sale_quantity || "-"
+                  }}
                 </p>
                 <a
                   v-if="detail.image_search.top1.product_url"
                   :href="detail.image_search.top1.product_url"
                   target="_blank"
                   rel="noopener noreferrer"
-                >打开 1688 商品</a>
+                  >打开 1688 商品</a
+                >
               </div>
             </div>
             <div
-              v-if="showMoreImageSearch && detail.image_search?.products?.length > 1"
+              v-if="
+                showMoreImageSearch && detail.image_search?.products?.length > 1
+              "
               class="image-search-more-grid"
             >
               <article
@@ -538,11 +605,27 @@ onMounted(loadGroups);
                 :key="item.rank"
                 class="image-search-result-card"
               >
-                <img v-if="item.image_url" :src="item.image_url" />
+                <img
+                  v-if="imageSearchImageVisible(item.image_url)"
+                  :src="item.image_url"
+                  referrerpolicy="no-referrer"
+                  @error="markImageSearchBroken(item.image_url)"
+                />
+                <div v-else class="image-placeholder">图片加载失败</div>
                 <span>Top {{ item.rank }}</span>
                 <strong>{{ item.title || "1688 图搜商品" }}</strong>
-                <small>价格：{{ item.price || "-" }} · 销量：{{ item.sale_quantity || "-" }}</small>
-                <a v-if="item.product_url" :href="item.product_url" target="_blank" rel="noopener noreferrer">打开商品</a>
+                <small
+                  >价格：{{ item.price || "-" }} · 销量：{{
+                    item.sale_quantity || "-"
+                  }}</small
+                >
+                <a
+                  v-if="item.product_url"
+                  :href="item.product_url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  >打开商品</a
+                >
               </article>
             </div>
             <button
@@ -550,13 +633,30 @@ onMounted(loadGroups);
               class="secondary"
               @click="showMoreImageSearch = !showMoreImageSearch"
             >
-              {{ showMoreImageSearch ? "收起结果" : `查看更多（${detail.image_search.products.length - 1}）` }}
+              {{
+                showMoreImageSearch
+                  ? "收起结果"
+                  : `查看更多（${detail.image_search.products.length - 1}）`
+              }}
             </button>
-            <p v-else-if="['pending', 'processing'].includes(detail.image_search?.status)" class="loading">正在执行 1688 以图找图</p>
-            <p v-else-if="detail.image_search?.status === 'failed'" class="error">
-              图搜失败：{{ detail.image_search.error_code || "UNKNOWN" }} · {{ detail.image_search.error_message || "未知错误" }}
+            <p
+              v-else-if="
+                ['pending', 'processing'].includes(detail.image_search?.status)
+              "
+              class="loading"
+            >
+              正在执行 1688 以图找图
             </p>
-            <p v-else-if="!detail.image_search?.top1" class="empty">暂无以图找图结果</p>
+            <p
+              v-else-if="detail.image_search?.status === 'failed'"
+              class="error"
+            >
+              图搜失败：{{ detail.image_search.error_code || "UNKNOWN" }} ·
+              {{ detail.image_search.error_message || "未知错误" }}
+            </p>
+            <p v-else-if="!detail.image_search?.top1" class="empty">
+              暂无以图找图结果
+            </p>
           </section>
           <h3>平台同款</h3>
           <div

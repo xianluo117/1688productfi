@@ -1,7 +1,9 @@
+import asyncio
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -19,14 +21,19 @@ from app.models import (
 )
 from app.schemas import TemuIngestBatchRequest, TemuIngestProduct
 from app.temu_image_download_services import enqueue_temu_image_scope
+from app.temu_image_search_client import cancel_remote_tasks
 from app.temu_image_search_services import (
+    claim_temu_image_search,
     config_payload,
     enqueue_temu_image_search,
     enqueue_temu_image_search_scope,
     image_search_config,
     image_search_stats,
     image_search_summaries,
+    normalize_result_image_url,
     replace_image_search_result,
+    resolve_search_image_url,
+    set_image_search_queue_state,
     update_image_search_config,
 )
 from app.temu_services import (
@@ -274,7 +281,9 @@ def test_image_search_config_encrypts_and_masks_api_key():
             config,
             base_url="https://search.example.com/",
             api_key="search-secret-key",
+            public_image_base_url="https://products.example.com/",
             auto_search_enabled=True,
+            concurrency=7,
             timeout_seconds=30,
             poll_interval_seconds=2,
             task_timeout_seconds=180,
@@ -283,11 +292,18 @@ def test_image_search_config_encrypts_and_masks_api_key():
         )
 
         assert config.base_url == "https://search.example.com"
+        assert config.public_image_base_url == "https://products.example.com"
         assert config.api_key_encrypted != "search-secret-key"
         payload = config_payload(config, settings)
         assert payload["api_key_configured"] is True
         assert payload["api_key_masked"] == "sea***key"
         assert payload["auto_search_enabled"] is True
+        assert payload["queue_state"] == "running"
+        assert payload["public_image_base_url"] == "https://products.example.com"
+        assert payload["concurrency"] == 7
+        assert normalize_result_image_url("//cbu01.alicdn.com/a.jpg") == "https://cbu01.alicdn.com/a.jpg"
+        assert normalize_result_image_url("http://cbu01.alicdn.com/a.jpg") == "https://cbu01.alicdn.com/a.jpg"
+        assert normalize_result_image_url("not-a-url") is None
 
 
 def test_image_search_enqueue_requires_ready_image_and_deduplicates():
@@ -435,7 +451,9 @@ def test_force_image_search_resets_failed_task():
         assert task is not None
         db.flush()
         task.status = "failed"
-        task.remote_task_id = "remote-old"
+        task.remote_stage = "product"
+        task.upload_task_id = "upload-old"
+        task.product_task_id = "product-old"
         task.attempts = 5
         task.last_error_code = "RATE_LIMITED"
         task.last_error = "limited"
@@ -451,10 +469,176 @@ def test_force_image_search_resets_failed_task():
         assert reset is task
         assert task.status == "pending"
         assert task.source == "manual"
-        assert task.remote_task_id is None
+        assert task.remote_stage is None
+        assert task.upload_task_id is None
+        assert task.product_task_id is None
         assert task.attempts == 0
         assert task.last_error_code is None
         assert task.last_error is None
+
+
+def test_image_search_uses_public_cached_image_and_falls_back(tmp_path: Path):
+    with create_session() as db:
+        user = create_user(db, "image-search-public-cache")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-image-search-public-cache", [incoming("625", 1)]),
+        )
+        product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "625"))
+        assert product is not None
+        product.cached_image_name = "temu-625-test image.jpg"
+        cached_path = tmp_path / product.cached_image_name
+        cached_path.write_bytes(b"image")
+        config = image_search_config(db)
+        config.public_image_base_url = "https://products.example.com"
+
+        image_url, source = resolve_search_image_url(product, config, tmp_path)
+        assert image_url == "https://products.example.com/images/temu-625-test%20image.jpg"
+        assert source == "cache"
+
+        cached_path.unlink()
+        image_url, source = resolve_search_image_url(product, config, tmp_path)
+        assert image_url == product.image_url
+        assert source == "temu"
+
+
+def test_image_search_queue_pause_preserves_two_stage_checkpoint():
+    with create_session() as db:
+        user = create_user(db, "image-search-queue")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-image-search-queue", [incoming("626", 1)]),
+        )
+        product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "626"))
+        assert product is not None
+        product.image_status = "ready"
+        task = enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="manual",
+        )
+        assert task is not None
+        db.flush()
+        task.status = "processing"
+        task.remote_stage = "product"
+        task.upload_task_id = "upload-626"
+        task.product_task_id = "product-626"
+        task.request_image_url = "https://products.example.com/images/626.jpg"
+        task.request_image_source = "cache"
+        db.commit()
+
+        config, interrupted = set_image_search_queue_state(db, "paused")
+        assert config.queue_state == "paused"
+        assert interrupted == 1
+        assert task.status == "pending"
+        assert task.remote_stage == "product"
+        assert task.upload_task_id == "upload-626"
+        assert task.product_task_id == "product-626"
+        assert claim_temu_image_search(db) is None
+
+        set_image_search_queue_state(db, "running")
+        claimed = claim_temu_image_search(db)
+        assert claimed is not None
+        assert claimed.remote_stage == "product"
+        assert claimed.upload_task_id == "upload-626"
+        assert claimed.product_task_id == "product-626"
+
+        config, interrupted = set_image_search_queue_state(db, "stopped")
+        assert config.queue_state == "stopped"
+        assert interrupted == 1
+        assert task.status == "pending"
+        assert task.upload_task_id == "upload-626"
+        assert task.product_task_id == "product-626"
+
+
+def test_cancel_remote_tasks_calls_product_before_upload():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(f"{request.method} {request.url.path}")
+        return httpx.Response(
+            200,
+            json={"task_id": request.url.path.rsplit("/", 1)[-1], "status": "cancelled"},
+        )
+
+    async def run_cancel() -> list[str]:
+        original_client = httpx.AsyncClient
+
+        class MockAsyncClient(httpx.AsyncClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(transport=httpx.MockTransport(handler))
+
+        httpx.AsyncClient = MockAsyncClient
+        try:
+            return await cancel_remote_tasks(
+                base_url="https://search.example.com:9443",
+                api_key="secret",
+                timeout_seconds=30,
+                upload_task_id="upload-1",
+                product_task_id="product-1",
+            )
+        finally:
+            httpx.AsyncClient = original_client
+
+    assert asyncio.run(run_cancel()) == []
+    assert calls == [
+        "DELETE /api/v1/product-tasks/product-1",
+        "DELETE /api/v1/upload-tasks/upload-1",
+    ]
+
+
+def test_cancel_remote_tasks_reports_failure_and_continues():
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if "product-tasks" in request.url.path:
+            return httpx.Response(
+                503,
+                json={
+                    "detail": {
+                        "code": "COOKIE_UNAVAILABLE",
+                        "message": "Cookie unavailable",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"task_id": "upload-2", "status": "cancelled"},
+        )
+
+    async def run_cancel() -> list[str]:
+        original_client = httpx.AsyncClient
+
+        class MockAsyncClient(httpx.AsyncClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(transport=httpx.MockTransport(handler))
+
+        httpx.AsyncClient = MockAsyncClient
+        try:
+            return await cancel_remote_tasks(
+                base_url="https://search.example.com",
+                api_key="secret",
+                timeout_seconds=30,
+                upload_task_id="upload-2",
+                product_task_id="product-2",
+            )
+        finally:
+            httpx.AsyncClient = original_client
+
+    failures = asyncio.run(run_cancel())
+    assert len(failures) == 1
+    assert "product-tasks/product-2" in failures[0]
+    assert calls == [
+        "/api/v1/product-tasks/product-2",
+        "/api/v1/upload-tasks/upload-2",
+    ]
 
 
 def test_temu_list_hides_ads_by_default_and_derives_shop_type():

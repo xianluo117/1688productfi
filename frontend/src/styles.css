@@ -1150,6 +1150,17 @@ dd {
   text-align: center;
 }
 
+.image-search-fallback {
+  display: grid;
+  width: 74px;
+  height: 74px;
+  place-items: center;
+  border: 2px solid #f97316;
+  border-radius: 12px;
+  background: #fff7ed;
+  font-weight: 700;
+}
+
 .image-search-image {
   width: 74px;
   height: 74px;
@@ -1190,6 +1201,7 @@ dd {
 
 .image-search-primary-image {
   width: 150px;
+  min-height: 150px;
   height: 150px;
   object-fit: cover;
   border-radius: 10px;

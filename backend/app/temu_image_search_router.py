@@ -21,10 +21,12 @@ from .schemas import (
     TemuImageSearchConfigResponse,
     TemuImageSearchConfigUpsert,
     TemuImageSearchHealthResponse,
+    TemuImageSearchQueueResponse,
     TemuImageSearchScopeRequest,
     TemuImageSearchStatsResponse,
     TemuImageSearchTaskResponse,
 )
+from .temu_image_search_client import cancel_remote_tasks
 from .temu_image_search_services import (
     config_payload,
     configured_search_api_key,
@@ -32,6 +34,7 @@ from .temu_image_search_services import (
     image_search_config,
     image_search_stats,
     reset_image_search_task,
+    set_image_search_queue_state,
     update_image_search_config,
 )
 
@@ -55,9 +58,13 @@ def task_response(
         group_id=task.group_id,
         group_name=group.name if group else None,
         image_url=task.image_url,
+        request_image_url=task.request_image_url,
+        request_image_source=task.request_image_source,
         source=task.source,
         status=task.status,
-        remote_task_id=task.remote_task_id,
+        remote_stage=task.remote_stage,
+        upload_task_id=task.upload_task_id,
+        product_task_id=task.product_task_id,
         attempts=task.attempts,
         last_error_code=task.last_error_code,
         last_error=task.last_error,
@@ -99,7 +106,11 @@ def save_config(
         config,
         base_url=str(payload.base_url),
         api_key=payload.api_key,
+        public_image_base_url=(
+            str(payload.public_image_base_url) if payload.public_image_base_url else None
+        ),
         auto_search_enabled=payload.auto_search_enabled,
+        concurrency=payload.concurrency,
         timeout_seconds=payload.timeout_seconds,
         poll_interval_seconds=payload.poll_interval_seconds,
         task_timeout_seconds=payload.task_timeout_seconds,
@@ -107,6 +118,78 @@ def save_config(
         settings=settings,
     )
     return TemuImageSearchConfigResponse(**config_payload(config, settings))
+
+
+@router.post("/queue/{action}", response_model=TemuImageSearchQueueResponse)
+async def control_queue(
+    action: str,
+    _: Annotated[AdminUser, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> TemuImageSearchQueueResponse:
+    state_by_action = {
+        "run": "running",
+        "resume": "running",
+        "pause": "paused",
+        "stop": "stopped",
+    }
+    state = state_by_action.get(action)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail="未知图搜队列操作",
+        )
+    config, interrupted = set_image_search_queue_state(db, state)
+    if state == "stopped":
+        remote_tasks = list(
+            db.scalars(
+                select(TemuImageSearchTask).where(
+                    TemuImageSearchTask.status.in_({"pending", "processing"}),
+                    (
+                        TemuImageSearchTask.upload_task_id.is_not(None)
+                        | TemuImageSearchTask.product_task_id.is_not(None)
+                    ),
+                )
+            )
+        )
+        try:
+            api_key = configured_search_api_key(config, settings)
+        except Exception as error:
+            api_key = None
+            cancellation_setup_error = str(error)
+        else:
+            cancellation_setup_error = None
+        for task in remote_tasks:
+            if api_key:
+                failures = await cancel_remote_tasks(
+                    base_url=config.base_url,
+                    api_key=api_key,
+                    timeout_seconds=config.timeout_seconds,
+                    upload_task_id=task.upload_task_id,
+                    product_task_id=task.product_task_id,
+                )
+            else:
+                failures = [
+                    cancellation_setup_error
+                    or "图搜 API Key 未配置，无法取消远程任务"
+                ]
+            task.last_error_code = (
+                "REMOTE_CANCEL_FAILED" if failures else None
+            )
+            task.last_error = (
+                "；".join(failures)[:4000]
+                if failures
+                else None
+            )
+            task.remote_stage = None
+            task.upload_task_id = None
+            task.product_task_id = None
+            task.request_image_url = None
+            task.request_image_source = None
+        db.commit()
+    return TemuImageSearchQueueResponse(
+        queue_state=config.queue_state,
+        interrupted_tasks=interrupted,
+    )
 
 
 @router.get("/health", response_model=TemuImageSearchHealthResponse)
@@ -124,16 +207,32 @@ async def health(
             )
         response.raise_for_status()
         payload = response.json()
-        tasks = payload.get("tasks") or {}
+        upload_tasks = payload.get("upload_tasks") or {}
+        product_tasks = payload.get("product_tasks") or {}
         cookie = payload.get("cookie") or {}
         return TemuImageSearchHealthResponse(
             status=str(payload.get("status") or "unknown"),
-            worker_limit=payload.get("worker_limit"),
+            worker_limit=(
+                int(payload.get("upload_workers") or 0)
+                + int(payload.get("product_workers") or 0)
+            ),
             cookie_available=cookie.get("available"),
-            queued=int(tasks.get("queued") or 0),
-            running=int(tasks.get("running") or 0),
-            succeeded=int(tasks.get("succeeded") or 0),
-            failed=int(tasks.get("failed") or 0),
+            queued=(
+                int(upload_tasks.get("queued") or 0)
+                + int(product_tasks.get("queued") or 0)
+            ),
+            running=(
+                int(upload_tasks.get("running") or 0)
+                + int(product_tasks.get("running") or 0)
+            ),
+            succeeded=(
+                int(upload_tasks.get("succeeded") or 0)
+                + int(product_tasks.get("succeeded") or 0)
+            ),
+            failed=(
+                int(upload_tasks.get("failed") or 0)
+                + int(product_tasks.get("failed") or 0)
+            ),
         )
     except Exception as error:
         return TemuImageSearchHealthResponse(status="error", message=str(error)[:1000])
