@@ -492,6 +492,108 @@ class TemuImageDownloadTask(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class TemuImageSearchConfig(Base):
+    __tablename__ = "temu_image_search_configs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    base_url: Mapped[str] = mapped_column(Text, default="")
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_search_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    poll_interval_seconds: Mapped[int] = mapped_column(Integer, default=2)
+    task_timeout_seconds: Mapped[int] = mapped_column(Integer, default=180)
+    updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TemuImageSearchTask(Base):
+    __tablename__ = "temu_image_search_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id", "image_url", name="uq_temu_image_search_product_url"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("temu_products.id", ondelete="CASCADE"), index=True
+    )
+    owner_id: Mapped[int | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("temu_product_groups.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    image_url: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(20), default="image_ready", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    remote_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class TemuImageSearchResult(Base):
+    __tablename__ = "temu_image_search_results"
+    __table_args__ = (
+        UniqueConstraint("task_id", name="uq_temu_image_search_result_task"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(
+        ForeignKey("temu_image_search_tasks.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("temu_products.id", ondelete="CASCADE"), index=True
+    )
+    search_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    found: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class TemuImageSearchResultItem(Base):
+    __tablename__ = "temu_image_search_result_items"
+    __table_args__ = (
+        UniqueConstraint("result_id", "rank", name="uq_temu_image_search_result_rank"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    result_id: Mapped[int] = mapped_column(
+        ForeignKey("temu_image_search_results.id", ondelete="CASCADE"), index=True
+    )
+    rank: Mapped[int] = mapped_column(Integer)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    price: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    sale_quantity: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    product_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class SimilarityScopePreference(Base):
     __tablename__ = "similarity_scope_preferences"
 

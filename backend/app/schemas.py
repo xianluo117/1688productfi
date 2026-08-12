@@ -361,6 +361,110 @@ class SimilarityConnectionTestResponse(BaseModel):
     message: str
 
 
+class TemuImageSearchConfigUpsert(BaseModel):
+    base_url: HttpUrl
+    api_key: str | None = Field(default=None, min_length=1, max_length=500)
+    auto_search_enabled: bool = False
+    timeout_seconds: int = Field(default=30, ge=5, le=120)
+    poll_interval_seconds: int = Field(default=2, ge=1, le=10)
+    task_timeout_seconds: int = Field(default=180, ge=30, le=600)
+
+    @field_validator("api_key")
+    @classmethod
+    def clean_search_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+
+class TemuImageSearchConfigResponse(BaseModel):
+    id: int
+    base_url: str
+    api_key_masked: str | None
+    api_key_configured: bool
+    auto_search_enabled: bool
+    timeout_seconds: int
+    poll_interval_seconds: int
+    task_timeout_seconds: int
+    updated_at: datetime
+
+
+class TemuImageSearchHealthResponse(BaseModel):
+    status: str
+    worker_limit: int | None = None
+    cookie_available: bool | None = None
+    queued: int = 0
+    running: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    message: str | None = None
+
+
+class TemuImageSearchScopeRequest(BaseModel):
+    owner_id: int = Field(gt=0)
+    group_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("group_ids")
+    @classmethod
+    def unique_search_group_ids(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(value))
+
+
+class TemuImageSearchStatsResponse(BaseModel):
+    total: int = 0
+    searchable: int = 0
+    succeeded_products: int = 0
+    waiting_products: int = 0
+    pending: int = 0
+    processing: int = 0
+    completed: int = 0
+    failed: int = 0
+
+
+class TemuImageSearchTaskResponse(BaseModel):
+    id: int
+    product_id: int
+    temu_product_id: str
+    title: str
+    owner_id: int | None
+    owner_name: str | None
+    group_id: int | None
+    group_name: str | None
+    image_url: str
+    source: str
+    status: str
+    remote_task_id: str | None
+    attempts: int
+    last_error_code: str | None
+    last_error: str | None
+    available_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class TemuImageSearchItemResponse(BaseModel):
+    rank: int
+    image_url: str | None = None
+    title: str | None = None
+    price: str | None = None
+    sale_quantity: str | None = None
+    product_url: str | None = None
+
+
+class TemuImageSearchSummaryResponse(BaseModel):
+    status: str | None = None
+    search_page_url: str | None = None
+    image_id: str | None = None
+    found: int | None = None
+    top1: TemuImageSearchItemResponse | None = None
+    products: list[TemuImageSearchItemResponse] = Field(default_factory=list)
+    error_code: str | None = None
+    error_message: str | None = None
+    finished_at: datetime | None = None
+
+
 class TemuImageDownloadScopeRequest(BaseModel):
     owner_id: int = Field(gt=0)
     group_ids: list[int] = Field(default_factory=list)
@@ -545,6 +649,7 @@ class TemuProductListItem(BaseModel):
     last_collected_at: datetime
     cluster_id: int | None = None
     cluster_member_count: int = 1
+    image_search: TemuImageSearchSummaryResponse | None = None
 
 
 class TemuProductPage(BaseModel):

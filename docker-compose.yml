@@ -79,6 +79,15 @@ services:
     volumes:
       - image_data:/data/images
 
+  temu-image-search-worker:
+    image: ${BACKEND_IMAGE:-qingmiaoai/1688productfitt:backend}
+    restart: unless-stopped
+    command: ['python', '-m', 'app.temu_image_search_worker']
+    environment: *backend-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   frontend:
     image: ${FRONTEND_IMAGE:-qingmiaoai/1688productfitt:frontend}
     restart: unless-stopped
@@ -88,6 +97,8 @@ services:
       similarity-worker:
         condition: service_started
       temu-image-worker:
+        condition: service_started
+      temu-image-search-worker:
         condition: service_started
     ports:
       - '${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-1788}:80'

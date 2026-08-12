@@ -7,8 +7,9 @@
 部署要求：
 
 - 数据库使用 `pgvector/pgvector:pg16`，迁移会启用 `vector` 扩展。
-- `migrate` 服务先完成数据库迁移，随后后端与独立 `similarity-worker` 才会启动。
-- 后端与独立 `similarity-worker` 共用数据库和图片卷。
+- `migrate` 服务先完成数据库迁移，随后后端与独立 Worker 才会启动。
+- 后端、`similarity-worker`、`temu-image-worker` 共用数据库和图片卷。
+- `temu-image-search-worker` 使用数据库持久化图搜任务，不依赖进程内后台任务。
 - `.env` 不需要填写 `AI_SECRET_KEY`。管理员面板保存的第三方 API Key 默认由 `SESSION_SECRET` 加密，因此必须保持 `SESSION_SECRET` 稳定。
 - 向量存储固定为 1536 维。实际图片模型可输出不超过 1536 维的向量，后端归一化后补零，允许后续切换模型维度而不重建列类型。
 
@@ -48,7 +49,28 @@ Temu 数据规则：
 - 半托管且包含 `Local` 标签显示为“半托Y1”，其他半托管显示为“半托Y2”。
 - Temu 油猴脚本同时支持 CSV 导出和个人令牌上传，每次 See more 后等待 5 秒再上传可靠关联记录。
 
-升级会自动执行 Alembic 迁移 `20260808_01` 并创建 Temu 独立数据表，升级前必须备份 PostgreSQL。
+升级会自动执行 Alembic 迁移并创建 Temu 独立数据表，升级前必须备份 PostgreSQL。
+
+## Temu 1688 以图找图
+
+管理员控制台提供独立“1688 以图找图”模块：
+
+1. 填写图搜服务根地址，例如 `https://search.example.com`。
+2. 填写 `SEARCH_API_KEY`。密钥由 `SESSION_SECRET` 加密保存，前端只显示脱敏值。
+3. 点击“检测服务”，确认健康状态为 `ok` 且 1688 Cookie 可用。
+4. 开启“图片就绪后自动图搜”并保存配置。
+5. 需要处理存量商品时，选择用户和 Temu 分组后执行“重新执行以图找图”。
+
+运行规则：
+
+- Temu 图片下载成功并标记为就绪后，自动创建持久化图搜任务。
+- 图搜 API 使用 Temu 规范化公网原图 URL，不使用 Docker 内部图片路径。
+- Worker 创建远程任务后每 2 秒轮询，默认最多等待 180 秒。
+- `429`、网络错误、HTTP `5xx` 和可重试远程错误使用指数退避，最多尝试 5 次。
+- 每次成功结果保存 1688 官方图搜页 URL、结果总数和排序最前的 3 个商品。
+- Temu 列表常态展示 Top1 图片；商品详情可查看更多结果并打开 1688 官方图搜页。
+- 外部图搜结果与人工确认的“显示货源”分开保存，不自动认定为正式货源。
+- 失败任务支持单条重试和按用户批量重试。
 
 ## 组成
 
@@ -125,7 +147,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Docker Compose 先运行一次性 `migrate` 服务执行 Alembic 升级，成功后才启动后端和图片相似度 worker。首次升级多用户版本时：
+Docker Compose 先运行一次性 `migrate` 服务执行 Alembic 升级，成功后才启动后端、图片下载、图片相似度和 1688 图搜 Worker。首次升级多用户版本时：
 
 1. 现有管理员账号标记为管理员角色。
 2. 现有分组、成员关系、批次和快照归属该管理员。
@@ -140,7 +162,7 @@ Docker Compose 先运行一次性 `migrate` 服务执行 Alembic 升级，成功
 
 ```bash
 docker compose ps
-docker compose logs -f backend frontend db
+docker compose logs -f backend frontend db similarity-worker temu-image-worker temu-image-search-worker
 curl -fsS http://127.0.0.1:1788/api/health
 ```
 
@@ -216,3 +238,6 @@ docker compose exec -T db psql -U product_manager product_manager < product_mana
 11. Temu 脚本可从 `www.temu.com` 通过 Tampermonkey 跨域请求加载分组并上传批次。
 12. 云启 `gdid` 与 Temu 原生商品 ID 不同时，同一原生商品卡片内的云启 Shadow DOM 仍可按可靠容器关联上传，并以原生 ID 更新商品。
 13. Temu 列表默认不显示广告；开启“显示广告产品”后才显示广告记录。
+14. Temu 图片就绪且自动图搜开启后，数据库出现等待或执行中的图搜任务。
+15. 图搜成功后 Temu 列表展示 Top1 图片，详情展示最多 3 条结果和 1688 官方图搜页链接。
+16. 管理员可按用户和分组补跑图搜，并可单条或批量重试失败任务。

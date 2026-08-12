@@ -10,6 +10,11 @@ from .image_cache import cache_product_image, normalize_temu_image_url
 from .models import TemuImageDownloadTask, TemuProduct
 from .similarity_services import enqueue_temu_product, queue_control
 from .temu_image_download_services import claim_temu_image_download
+from .temu_image_search_services import (
+    configured_search_api_key,
+    enqueue_temu_image_search,
+    image_search_config,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,6 +59,20 @@ async def process_download(task_id: int) -> None:
                 enqueue_temu_product(db, product)
             else:
                 product.similarity_status = "disabled"
+            search_config = image_search_config(db)
+            if search_config.auto_search_enabled:
+                try:
+                    configured_search_api_key(search_config, settings)
+                except ValueError:
+                    logger.warning("Temu image search is enabled but API config is incomplete")
+                else:
+                    enqueue_temu_image_search(
+                        db,
+                        product,
+                        owner_id=task.owner_id,
+                        group_id=task.group_id,
+                        source="image_ready",
+                    )
             task.status = "completed"
             task.last_error = None
             task.locked_at = None

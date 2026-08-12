@@ -5,16 +5,30 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.database import Base
 from app.image_cache import normalize_temu_image_url
 from app.models import (
     AdminUser,
     TemuImageDownloadTask,
+    TemuImageSearchResult,
+    TemuImageSearchResultItem,
+    TemuImageSearchTask,
     TemuProduct,
     TemuProductSnapshot,
 )
 from app.schemas import TemuIngestBatchRequest, TemuIngestProduct
 from app.temu_image_download_services import enqueue_temu_image_scope
+from app.temu_image_search_services import (
+    config_payload,
+    enqueue_temu_image_search,
+    enqueue_temu_image_search_scope,
+    image_search_config,
+    image_search_stats,
+    image_search_summaries,
+    replace_image_search_result,
+    update_image_search_config,
+)
 from app.temu_services import (
     TemuFilters,
     derive_shop_type,
@@ -243,6 +257,204 @@ def test_temu_valid_image_replaces_existing_product_image():
         )
         assert product is not None
         assert product.image_url == updated_url
+
+
+def test_image_search_config_encrypts_and_masks_api_key():
+    with create_session() as db:
+        admin = create_user(db, "image-search-config")
+        settings = Settings(
+            _env_file=None,
+            admin_password="test-admin-password",
+            session_secret="test-session-secret",
+            database_url="sqlite+pysqlite:///:memory:",
+        )
+        config = image_search_config(db)
+        update_image_search_config(
+            db,
+            config,
+            base_url="https://search.example.com/",
+            api_key="search-secret-key",
+            auto_search_enabled=True,
+            timeout_seconds=30,
+            poll_interval_seconds=2,
+            task_timeout_seconds=180,
+            updated_by=admin.id,
+            settings=settings,
+        )
+
+        assert config.base_url == "https://search.example.com"
+        assert config.api_key_encrypted != "search-secret-key"
+        payload = config_payload(config, settings)
+        assert payload["api_key_configured"] is True
+        assert payload["api_key_masked"] == "sea***key"
+        assert payload["auto_search_enabled"] is True
+
+
+def test_image_search_enqueue_requires_ready_image_and_deduplicates():
+    with create_session() as db:
+        user = create_user(db, "image-search-dedupe")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-image-search-dedupe", [incoming("620", 1)]),
+        )
+        product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "620"))
+        assert product is not None
+        assert enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="image_ready",
+        ) is None
+
+        product.image_status = "ready"
+        first = enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="image_ready",
+        )
+        db.flush()
+        second = enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="image_ready",
+        )
+        assert first is not None
+        assert second is first
+        assert db.query(TemuImageSearchTask).count() == 1
+
+
+def test_manual_image_search_scope_only_enqueues_ready_products():
+    with create_session() as db:
+        user = create_user(db, "image-search-scope")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(
+                group.id,
+                "temu-image-search-scope",
+                [incoming("621", 1), incoming("622", 2)],
+            ),
+        )
+        ready = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "621"))
+        pending = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "622"))
+        assert ready is not None and pending is not None
+        ready.image_status = "ready"
+        pending.image_status = "pending"
+
+        assert enqueue_temu_image_search_scope(db, user.id, [group.id]) == 1
+        task = db.scalar(select(TemuImageSearchTask))
+        assert task is not None
+        assert task.product_id == ready.id
+        assert task.source == "manual"
+        stats = image_search_stats(db, user.id, [group.id])
+        assert stats["total"] == 2
+        assert stats["searchable"] == 1
+        assert stats["pending"] == 1
+
+
+def test_image_search_result_saves_top_three_and_builds_summary():
+    with create_session() as db:
+        user = create_user(db, "image-search-result")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-image-search-result", [incoming("623", 1)]),
+        )
+        product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "623"))
+        assert product is not None
+        product.image_status = "ready"
+        task = enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="manual",
+        )
+        assert task is not None
+        db.flush()
+        replace_image_search_result(
+            db,
+            task,
+            {
+                "search_page_url": "https://air.1688.com/search",
+                "image_id": "image-623",
+                "found": 698,
+                "products": [
+                    {
+                        "image": f"https://cbu01.alicdn.com/{rank}.jpg",
+                        "title": f"Product {rank}",
+                        "price": rank,
+                        "sale_quantity": rank * 10,
+                        "product_url": f"https://detail.1688.com/offer/{rank}.html",
+                    }
+                    for rank in range(1, 5)
+                ],
+            },
+        )
+        task.status = "completed"
+        db.flush()
+
+        result = db.scalar(select(TemuImageSearchResult))
+        assert result is not None
+        assert db.query(TemuImageSearchResultItem).count() == 3
+        summary = image_search_summaries(db, [product.id])[product.id]
+        assert summary["search_page_url"] == "https://air.1688.com/search"
+        assert summary["found"] == 698
+        assert summary["top1"]["title"] == "Product 1"
+        assert [item["rank"] for item in summary["products"]] == [1, 2, 3]
+
+
+def test_force_image_search_resets_failed_task():
+    with create_session() as db:
+        user = create_user(db, "image-search-reset")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(group.id, "temu-image-search-reset", [incoming("624", 1)]),
+        )
+        product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "624"))
+        assert product is not None
+        product.image_status = "ready"
+        task = enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="image_ready",
+        )
+        assert task is not None
+        db.flush()
+        task.status = "failed"
+        task.remote_task_id = "remote-old"
+        task.attempts = 5
+        task.last_error_code = "RATE_LIMITED"
+        task.last_error = "limited"
+
+        reset = enqueue_temu_image_search(
+            db,
+            product,
+            owner_id=user.id,
+            group_id=group.id,
+            source="manual",
+            force=True,
+        )
+        assert reset is task
+        assert task.status == "pending"
+        assert task.source == "manual"
+        assert task.remote_task_id is None
+        assert task.attempts == 0
+        assert task.last_error_code is None
+        assert task.last_error is None
 
 
 def test_temu_list_hides_ads_by_default_and_derives_shop_type():

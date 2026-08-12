@@ -41,6 +41,8 @@ from .temu_services import (
     temu_product_to_item,
 )
 from .services import product_to_item
+from .temu_image_search_services import image_search_summaries
+
 router = APIRouter(prefix="/api/temu", tags=["temu"])
 
 
@@ -222,8 +224,17 @@ def group_products(
     products, total = list_temu_group_products(
         db, group.id, group.owner_id, page, page_size, resolved_field, resolved_direction, filters
     )
+    search_summaries = image_search_summaries(db, [product.id for product in products])
+    items = []
+    for product in products:
+        item = temu_product_to_item(product)
+        summary = search_summaries.get(product.id)
+        if summary:
+            summary = {**summary, "products": summary["products"][:1]}
+            item.image_search = summary
+        items.append(item)
     return TemuProductPage(
-        items=[temu_product_to_item(product) for product in products],
+        items=items,
         total=total,
         page=page,
         page_size=page_size,
@@ -276,6 +287,7 @@ def product_detail(
         CrossPlatformProductRelation, CrossPlatformProductRelation.product_id == Product.id
     ).where(CrossPlatformProductRelation.temu_product_id == product.id).order_by(Product.total_pieces.desc())))
     item = temu_product_to_item(product)
+    item.image_search = image_search_summaries(db, [product.id]).get(product.id)
     return TemuProductDetail(
         **item.model_dump(),
         groups=[TemuGroupResponse.model_validate(group) for group in groups],

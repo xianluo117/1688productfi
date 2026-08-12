@@ -33,6 +33,12 @@ const entries = [
     title: "Temu 图片下载",
     description: "按用户和分组补齐图片并查看实时下载日志",
   },
+  {
+    id: "temu-image-search",
+    icon: "搜图",
+    title: "1688 以图找图",
+    description: "配置图搜 API、补跑 Temu 商品并查看任务日志",
+  },
 ];
 </script>
 

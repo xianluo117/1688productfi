@@ -6,6 +6,7 @@ import PlatformHome from "./components/PlatformHome.vue";
 import Product1688Manager from "./components/Product1688Manager.vue";
 import SimilarityAdmin from "./components/SimilarityAdmin.vue";
 import TemuImageDownloadAdmin from "./components/TemuImageDownloadAdmin.vue";
+import TemuImageSearchAdmin from "./components/TemuImageSearchAdmin.vue";
 import TemuManager from "./components/TemuManager.vue";
 import UserManagement from "./components/UserManagement.vue";
 
@@ -165,6 +166,12 @@ onMounted(async () => {
 
   <TemuImageDownloadAdmin
     v-else-if="isAdmin && selectedModule === 'temu-images'"
+    :users="users"
+    @back="backHome"
+  />
+
+  <TemuImageSearchAdmin
+    v-else-if="isAdmin && selectedModule === 'temu-image-search'"
     :users="users"
     @back="backHome"
   />
