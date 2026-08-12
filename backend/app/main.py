@@ -69,6 +69,7 @@ from .services import (
 from .temu_services import temu_product_to_item
 from .similarity_router import router as similarity_router
 from .similarity_services import enqueue_product, queue_control
+from .temu_image_download_router import router as temu_image_download_router
 from .temu_router import router as temu_router
 
 
@@ -107,6 +108,7 @@ app.add_middleware(
 )
 app.mount("/images", StaticFiles(directory=settings.image_storage_path, check_dir=False), name="images")
 app.include_router(temu_router)
+app.include_router(temu_image_download_router)
 app.include_router(similarity_router)
 
 

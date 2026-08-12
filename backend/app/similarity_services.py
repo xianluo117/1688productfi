@@ -133,15 +133,13 @@ def enqueue_temu_product(
     product: TemuProduct,
     config: ImageEmbeddingConfig | None = None,
 ) -> TemuSimilarityTask | None:
-    if not product.cached_image_name and not product.image_url:
-        product.image_status = "missing"
+    if not product.cached_image_name or product.image_status != "ready":
         return None
     config = config or active_config(db)
     if config is None:
         product.similarity_status = "disabled"
         return None
-    image_source = product.cached_image_name or product.image_url
-    image_hash = product.image_content_hash or f"pending:{image_source}"
+    image_hash = product.image_content_hash or f"pending:{product.cached_image_name}"
     existing = db.scalar(select(TemuSimilarityTask).where(
         TemuSimilarityTask.product_id == product.id,
         TemuSimilarityTask.config_id == config.id,
@@ -249,7 +247,8 @@ def enqueue_scope_temu_products(db: Session, config: ImageEmbeddingConfig, produ
         return 0
     products = db.scalars(select(TemuProduct).where(
         TemuProduct.id.in_(product_ids),
-        (TemuProduct.cached_image_name.is_not(None) | TemuProduct.image_url.is_not(None)),
+        TemuProduct.cached_image_name.is_not(None),
+        TemuProduct.image_status == "ready",
     )).all()
     count = 0
     for product in products:

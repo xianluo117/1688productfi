@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .image_cache import normalize_temu_image_url
+from .temu_image_download_services import enqueue_temu_image_download
 from .models import (
     AdminUser,
     TemuCollectionBatch,
@@ -229,6 +230,14 @@ def ingest_temu_batch(
             product.image_content_hash = None
             product.image_phash = None
             product.similarity_status = "pending"
+            enqueue_temu_image_download(
+                db,
+                product,
+                owner_id=owner.id,
+                group_id=group.id,
+                source="ingest",
+                force=True,
+            )
             images_to_cache.append((product.id, current_image_url))
 
         membership = db.scalar(select(TemuGroupMembership).where(

@@ -27,6 +27,12 @@ const entries = [
     title: "相似度检索",
     description: "管理向量模型、处理范围、任务与审核",
   },
+  {
+    id: "temu-images",
+    icon: "图片",
+    title: "Temu 图片下载",
+    description: "按用户和分组补齐图片并查看实时下载日志",
+  },
 ];
 </script>
 
@@ -58,7 +64,7 @@ const entries = [
       <section class="platform-intro">
         <p class="section-label">控制台</p>
         <h1>选择管理模块</h1>
-        <p>1688、Temu、用户和相似度检索已拆分为独立模块。</p>
+        <p>产品、用户、图片下载和相似度检索已拆分为独立模块。</p>
       </section>
 
       <section class="platform-grid console-grid" aria-label="管理员模块列表">

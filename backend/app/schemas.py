@@ -361,6 +361,47 @@ class SimilarityConnectionTestResponse(BaseModel):
     message: str
 
 
+class TemuImageDownloadScopeRequest(BaseModel):
+    owner_id: int = Field(gt=0)
+    group_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("group_ids")
+    @classmethod
+    def unique_download_group_ids(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(value))
+
+
+class TemuImageDownloadStatsResponse(BaseModel):
+    total: int = 0
+    ready: int = 0
+    missing: int = 0
+    waiting: int = 0
+    pending: int = 0
+    processing: int = 0
+    completed: int = 0
+    failed: int = 0
+
+
+class TemuImageDownloadTaskResponse(BaseModel):
+    id: int
+    product_id: int
+    temu_product_id: str
+    title: str
+    owner_id: int | None
+    owner_name: str | None
+    group_id: int | None
+    group_name: str | None
+    image_url: str
+    source: str
+    status: str
+    attempts: int
+    last_error: str | None
+    available_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    created_at: datetime
+
+
 class SimilarityTaskStatsResponse(BaseModel):
     pending: int = 0
     processing: int = 0

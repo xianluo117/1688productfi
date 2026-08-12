@@ -65,6 +65,120 @@ a {
   display: grid;
   grid-template-columns: 260px 1fr;
 }
+.app-shell > .topbar,
+.app-shell > .panel,
+.app-shell > .stats-grid {
+  grid-column: 1 / -1;
+  margin-left: 28px;
+  margin-right: 28px;
+}
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 24px 0 6px;
+}
+.topbar h1 {
+  margin: 14px 0 4px;
+}
+.topbar p,
+.section-heading p,
+.muted {
+  color: #667085;
+}
+.panel {
+  margin-top: 18px;
+  padding: 20px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px #0000000d;
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 14px;
+}
+.form-grid label {
+  display: grid;
+  gap: 6px;
+}
+.wide {
+  grid-column: 1 / -1;
+}
+.checkbox-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.checkbox-item {
+  display: flex !important;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid #e4e7ec;
+  border-radius: 8px;
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.stats-grid article {
+  display: grid;
+  gap: 4px;
+  padding: 16px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 4px 18px #0000000d;
+}
+.stats-grid strong {
+  font-size: 25px;
+}
+.filter-row {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.filter-row label {
+  display: grid;
+  gap: 5px;
+}
+.status-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef1f5;
+}
+.status-badge.completed {
+  background: #dcfae6;
+  color: #067647;
+}
+.status-badge.failed {
+  background: #fee4e2;
+  color: #b42318;
+}
+.status-badge.processing {
+  background: #e0f2fe;
+  color: #026aa2;
+}
+.status-badge.pending {
+  background: #fef0c7;
+  color: #93370d;
+}
+.error-cell {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+td small {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  color: #667085;
+  text-overflow: ellipsis;
+}
 aside {
   background: #18202b;
   color: white;

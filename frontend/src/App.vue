@@ -5,6 +5,7 @@ import AdminConsole from "./components/AdminConsole.vue";
 import PlatformHome from "./components/PlatformHome.vue";
 import Product1688Manager from "./components/Product1688Manager.vue";
 import SimilarityAdmin from "./components/SimilarityAdmin.vue";
+import TemuImageDownloadAdmin from "./components/TemuImageDownloadAdmin.vue";
 import TemuManager from "./components/TemuManager.vue";
 import UserManagement from "./components/UserManagement.vue";
 
@@ -158,6 +159,12 @@ onMounted(async () => {
 
   <SimilarityAdmin
     v-else-if="isAdmin && selectedModule === 'similarity'"
+    :users="users"
+    @back="backHome"
+  />
+
+  <TemuImageDownloadAdmin
+    v-else-if="isAdmin && selectedModule === 'temu-images'"
     :users="users"
     @back="backHome"
   />

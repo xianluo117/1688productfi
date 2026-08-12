@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import logging
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .auth import get_current_user, get_ingest_user
-from .config import get_settings
-from .database import SessionLocal, get_db
-from .image_cache import cache_product_image, normalize_temu_image_url
+from .database import get_db
 from .models import (
     AdminUser,
     CrossPlatformProductRelation,
@@ -44,11 +41,7 @@ from .temu_services import (
     temu_product_to_item,
 )
 from .services import product_to_item
-from .similarity_services import enqueue_temu_product, queue_control
-
 router = APIRouter(prefix="/api/temu", tags=["temu"])
-settings = get_settings()
-logger = logging.getLogger(__name__)
 
 
 def resolve_owner_id(current_user: AdminUser, requested_owner_id: int | None) -> int:
@@ -154,56 +147,14 @@ def ensure_ingest_group(
     return group
 
 
-async def cache_temu_image_task(product_id: int, image_url: str) -> None:
-    normalized_url = normalize_temu_image_url(image_url)
-    try:
-        with SessionLocal() as db:
-            product = db.get(TemuProduct, product_id)
-            if not product:
-                return
-            filename = await cache_product_image(
-                product.temu_product_id,
-                normalized_url,
-                settings,
-                namespace="temu",
-            )
-            image_changed = filename != product.cached_image_name
-            product.image_url = normalized_url
-            product.cached_image_name = filename
-            product.image_status = "ready"
-            if image_changed:
-                product.image_content_hash = None
-                product.image_phash = None
-                product.similarity_status = "pending"
-            if queue_control(db).auto_vectorization_enabled:
-                enqueue_temu_product(db, product)
-            else:
-                product.similarity_status = "disabled"
-            db.commit()
-    except Exception as error:
-        logger.exception(
-            "Failed to cache Temu image for product %s from %s: %s",
-            product_id,
-            normalized_url,
-            error,
-        )
-        with SessionLocal() as db:
-            product = db.get(TemuProduct, product_id)
-            if product:
-                product.image_status = "failed"
-                product.similarity_status = "failed"
-                db.commit()
-
-
 @router.post("/ingest/batches", response_model=IngestBatchResponse)
 def create_ingest_batch(
     payload: TemuIngestBatchRequest,
-    background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_db)],
     ingest_user: Annotated[AdminUser, Depends(get_ingest_user)],
 ) -> IngestBatchResponse:
     try:
-        batch, duplicate, images = ingest_temu_batch(db, ingest_user, payload)
+        batch, duplicate, _ = ingest_temu_batch(db, ingest_user, payload)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail="Temu 分组不存在或不属于当前令牌用户") from exc
     except ValueError as exc:
@@ -212,8 +163,6 @@ def create_ingest_batch(
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="Temu 上传冲突，请使用相同幂等键重试") from exc
-    for product_id, image_url in images:
-        background_tasks.add_task(cache_temu_image_task, product_id, image_url)
     return IngestBatchResponse(batch_id=batch.id, accepted=batch.item_count, duplicate=duplicate)
 
 

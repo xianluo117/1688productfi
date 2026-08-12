@@ -255,7 +255,7 @@ def test_enqueue_scope_products_skips_duplicate_current_task():
         assert db.query(SimilarityTask).count() == 1
 
 
-def test_enqueue_scope_temu_products_accepts_remote_image_without_cache():
+def test_enqueue_scope_temu_products_requires_ready_cached_image():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -272,7 +272,8 @@ def test_enqueue_scope_temu_products_accepts_remote_image_without_cache():
             title="Temu remote image",
             product_url="https://www.temu.com/g-9001.html",
             image_url="https://img.kwcdn.com/product/fancy/remote.jpg",
-            image_status="pending",
+            cached_image_name="temu-9001.jpg",
+            image_status="ready",
         )
         db.add_all([config, item])
         db.flush()

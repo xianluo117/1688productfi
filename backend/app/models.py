@@ -469,6 +469,29 @@ class CrossPlatformProductRelation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
+class TemuImageDownloadTask(Base):
+    __tablename__ = "temu_image_download_tasks"
+    __table_args__ = (
+        UniqueConstraint("product_id", "image_url", name="uq_temu_image_download_product_url"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("temu_products.id", ondelete="CASCADE"), index=True)
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("temu_product_groups.id", ondelete="SET NULL"), nullable=True, index=True)
+    image_url: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(20), default="ingest", index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
 class SimilarityScopePreference(Base):
     __tablename__ = "similarity_scope_preferences"
 

@@ -1,13 +1,20 @@
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.image_cache import normalize_temu_image_url
-from app.models import AdminUser, TemuProduct, TemuProductSnapshot
+from app.models import (
+    AdminUser,
+    TemuImageDownloadTask,
+    TemuProduct,
+    TemuProductSnapshot,
+)
 from app.schemas import TemuIngestBatchRequest, TemuIngestProduct
+from app.temu_image_download_services import enqueue_temu_image_scope
 from app.temu_services import (
     TemuFilters,
     derive_shop_type,
@@ -120,6 +127,15 @@ def test_temu_ingest_stores_original_kwcdn_image_url():
         assert product is not None
         assert product.image_url == "https://img.kwcdn.com/product/fancy/example.jpg"
         assert images == [(product.id, product.image_url)]
+        task = db.scalar(
+            select(TemuImageDownloadTask).where(
+                TemuImageDownloadTask.product_id == product.id
+            )
+        )
+        assert task is not None
+        assert task.status == "pending"
+        assert task.source == "ingest"
+        assert task.image_url == product.image_url
 
 
 def test_temu_batch_duplicate_product_id_uses_last_value():
@@ -136,6 +152,36 @@ def test_temu_batch_duplicate_product_id_uses_last_value():
         assert created.item_count == 1
         product = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "602"))
         assert product.daily_sales == 8
+
+
+def test_manual_image_scope_skips_ready_file_and_enqueues_failed_file(tmp_path: Path):
+    with create_session() as db:
+        user = create_user(db, "manual-image-temu")
+        group, _ = get_or_create_temu_group(db, user.id, "A")
+        ingest_temu_batch(
+            db,
+            user,
+            batch(
+                group.id,
+                "temu-manual-images",
+                [incoming("610", 1), incoming("611", 2)],
+            ),
+        )
+        ready = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "610"))
+        failed = db.scalar(select(TemuProduct).where(TemuProduct.temu_product_id == "611"))
+        assert ready is not None and failed is not None
+        ready.cached_image_name = "ready.jpg"
+        ready.image_status = "ready"
+        (tmp_path / "ready.jpg").write_bytes(b"ready")
+        failed.image_status = "failed"
+        db.query(TemuImageDownloadTask).delete()
+        db.flush()
+
+        assert enqueue_temu_image_scope(db, user.id, [group.id], tmp_path) == 1
+        task = db.scalar(select(TemuImageDownloadTask))
+        assert task is not None
+        assert task.product_id == failed.id
+        assert task.source == "manual"
 
 
 def test_temu_empty_image_does_not_replace_existing_product_image():
