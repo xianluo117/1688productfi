@@ -843,6 +843,23 @@ dd {
   color: #667085;
 }
 
+.temu-group-tag {
+  display: inline-flex;
+  margin: 2px 4px 2px 0;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #eef4ff;
+  color: #3448a3;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.temu-row-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
 .console-content {
   min-height: 100vh;
   padding: 32px;

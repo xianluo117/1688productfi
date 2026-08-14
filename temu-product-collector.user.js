@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Temu 商品与云启数据追加采集器
 // @namespace    https://www.temu.com/
-// @version      0.2.3
+// @version      0.3.0
 // @description  依赖云启数据扩展，采集 Temu 商品、销量、销售额、店铺信息，自动点击 See more，支持令牌上传与 CSV 导出
 // @author       Zoo
 // @match        https://www.temu.com/*
@@ -25,6 +25,7 @@
   const SHADOW_REGISTRY_KEY = "__zooTemuCapturedShadowRootsV1";
   const DEFAULT_MAX_LOADS = 50;
   const LOAD_TIMEOUT_MS = 30000;
+  const SEARCH_RESULT_TIMEOUT_MS = 8000;
   const YUNQI_RENDER_TIMEOUT_MS = 20000;
   const POST_LOAD_YUNQI_WAIT_MS = 5000;
   const MAX_NO_GROWTH_ROUNDS = 3;
@@ -74,6 +75,15 @@
       startedAt: null,
       updatedAt: null,
       stopReason: "",
+      paused: false,
+      pauseReason: "",
+      keywords: [],
+      keywordIndex: 0,
+      currentKeyword: "",
+      keywordLoads: 0,
+      batchIndex: 0,
+      pendingBatchRecords: [],
+      pendingBatchPages: [],
       groupId: null,
       groupName: "",
       uploadedPages: [],
@@ -106,6 +116,8 @@
       apiToken: "",
       selectedGroupId: "",
       groupNameInput: "",
+      keywordsInput: "",
+      sameGroup: true,
     };
     const saved = GM_getValue(CONFIG_KEY, null);
     if (saved && typeof saved === "object") {
@@ -956,11 +968,18 @@
   }
 
   async function uploadPageWithRetry(sourcePage, records) {
-    const accepted = uploadableRecords(records);
+    const unique = new Map();
+    for (const record of uploadableRecords(records)) {
+      unique.set(record.nativeProductId, record);
+    }
+    const accepted = [...unique.values()];
     if (!accepted.length)
       throw new Error(`第 ${sourcePage} 页没有可靠关联、可上传的商品`);
+    const keywordKey = encodeURIComponent(
+      state.currentKeyword || "manual",
+    ).slice(0, 40);
     const payload = {
-      idempotency_key: `temu-${state.startedAt}-${state.groupId}-page-${sourcePage}`,
+      idempotency_key: `temu-${state.startedAt}-${state.groupId}-${keywordKey}-batch-${state.batchIndex}`,
       group_id: state.groupId,
       source_page: sourcePage,
       products: accepted.map(toUploadProduct),
@@ -983,6 +1002,85 @@
         await sleep(Math.min(30000, 2000 * 2 ** (attempt - 1)));
       }
     }
+  }
+
+  function parseKeywords(value) {
+    return [
+      ...new Set(
+        String(value || "")
+          .split(/\r?\n/)
+          .map(cleanText)
+          .filter(Boolean),
+      ),
+    ];
+  }
+
+  function searchInput() {
+    return document.querySelector(
+      '#searchBar #searchInput, input#searchInput[type="search"]',
+    );
+  }
+
+  async function submitKeywordSearch(keyword) {
+    const input = searchInput();
+    if (!input) throw new Error("未找到 Temu 搜索输入框");
+    input.focus();
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(input, keyword);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    const button = document.querySelector(
+      '#searchBar [role="button"][aria-label="Submit search"]',
+    );
+    if (button) button.click();
+    else
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          code: "Enter",
+          bubbles: true,
+        }),
+      );
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < SEARCH_RESULT_TIMEOUT_MS) {
+      if (findNativeCards().length > 0) return;
+      if (stopRequested) return;
+      await sleep(250);
+    }
+    state.paused = true;
+    state.pauseReason = `关键词“${keyword}”搜索 8 秒后仍无商品，可能遇到人机验证`;
+    state.status = `${state.pauseReason}。处理验证后点击继续`;
+    saveState();
+    window.alert(state.status);
+    throw new Error("COLLECTOR_PAUSED");
+  }
+
+  async function resolveKeywordGroup(keyword, sameGroup) {
+    if (sameGroup) return resolveCollectionGroup();
+    const group = await apiRequest("POST", "/api/temu/ingest/groups", {
+      name: keyword,
+    });
+    state.groupId = group.id;
+    state.groupName = group.name;
+    return group;
+  }
+
+  async function flushPendingBatch() {
+    if (!state.pendingBatchRecords.length) return;
+    state.batchIndex += 1;
+    const sourcePage = Math.max(...state.pendingBatchPages, 1);
+    await uploadPageWithRetry(sourcePage, state.pendingBatchRecords);
+    state.pendingBatchRecords = [];
+    state.pendingBatchPages = [];
+    saveState();
+  }
+
+  function queueBatchPage(sourcePage, records) {
+    state.pendingBatchPages.push(sourcePage);
+    state.pendingBatchRecords.push(...records);
   }
 
   function isSeeMoreButton(element) {
@@ -1091,10 +1189,7 @@
   }
 
   async function runCollector() {
-    if (state.active) {
-      return;
-    }
-
+    if (state.active) return;
     const panel = document.getElementById(PANEL_ID);
     const config = {
       ...loadApiConfig(),
@@ -1102,117 +1197,118 @@
       apiToken: panel.querySelector("#zoo-temu-api-token").value,
       groupNameInput: panel.querySelector("#zoo-temu-group-name").value,
       selectedGroupId: panel.querySelector("#zoo-temu-group").value,
+      keywordsInput: panel.querySelector("#zoo-temu-keywords").value,
+      sameGroup: panel.querySelector("#zoo-temu-same-group").checked,
     };
+    const keywords = parseKeywords(config.keywordsInput);
+    if (!keywords.length) {
+      state.status = "请至少输入一个搜索关键词";
+      saveState();
+      return;
+    }
     saveApiConfig(config);
-    const group = await resolveCollectionGroup();
-    state.groupId = group.id;
-    state.groupName = group.name;
-    state.uploadedPages = [];
-    const maxLoadsInput = document.querySelector(
-      `#${PANEL_ID} #zoo-temu-max-loads`,
+    const maxLoads = Number.parseInt(
+      panel.querySelector("#zoo-temu-max-loads").value,
+      10,
     );
-    const maxLoads = Number.parseInt(maxLoadsInput?.value || "", 10);
     state.maxLoads =
       Number.isInteger(maxLoads) && maxLoads >= 0
         ? maxLoads
         : DEFAULT_MAX_LOADS;
+    if (!state.paused) {
+      Object.assign(state, {
+        keywords,
+        keywordIndex: 0,
+        currentKeyword: "",
+        keywordLoads: 0,
+        successfulLoads: 0,
+        batchIndex: 0,
+        pendingBatchRecords: [],
+        pendingBatchPages: [],
+        uploadedPages: [],
+        startedAt: new Date().toISOString(),
+        stopReason: "",
+      });
+    }
+    state.paused = false;
+    state.pauseReason = "";
     state.active = true;
-    state.status = "正在等待 Temu 商品和云启数据加载";
-    state.startedAt = new Date().toISOString();
-    state.stopReason = "";
     stopRequested = false;
     saveState();
-
     try {
-      const initial = await waitForYunqiData(1);
-      if (initial.yunqiCardCount === 0) {
-        const captured = initial.capturedShadowRootCount;
-        throw new Error(
-          captured === 0
-            ? "未读取到云启数据卡片，也未捕获 ShadowRoot。请确认云启数据扩展已安装并启用；扩展若在隔离世界创建 closed ShadowRoot，当前浏览器组合可能不兼容。"
-            : "已捕获 ShadowRoot，但未发现云启数据卡片。请等待云启数据加载完成后重试。",
-        );
-      }
-
-      const initialMerge = mergeCollectedRecords(initial.records, 1);
-      await uploadPageWithRetry(1, initial.records);
-      state.currentSourcePage = Math.max(state.currentSourcePage || 1, 1);
-      state.status = `第 1 页完成并上传：新增 ${initialMerge.added} 条，云启卡片 ${initial.yunqiCardCount} 条`;
-      saveState();
-
-      let noGrowthRounds = 0;
-      while (!stopRequested && state.successfulLoads < state.maxLoads) {
-        window.scrollTo({
-          top: document.documentElement.scrollHeight,
-          behavior: "auto",
-        });
-        await sleep(800);
-        const button = findSeeMoreButton();
-        if (isButtonUnavailable(button)) {
-          state.stopReason = "See more 按钮不存在或不可用";
-          break;
-        }
-
-        const beforeKeys = currentVisibleKeys();
-        const targetPage = state.successfulLoads + 2;
-        state.status = `正在点击 See more，等待第 ${targetPage} 页追加商品`;
+      for (
+        ;
+        state.keywordIndex < state.keywords.length;
+        state.keywordIndex += 1
+      ) {
+        const keyword = state.keywords[state.keywordIndex];
+        state.currentKeyword = keyword;
+        state.keywordLoads = 0;
+        state.pendingBatchRecords = [];
+        state.pendingBatchPages = [];
+        const group = await resolveKeywordGroup(keyword, config.sameGroup);
+        state.groupId = group.id;
+        state.groupName = group.name;
+        state.status = `正在搜索 ${state.keywordIndex + 1}/${state.keywords.length}：${keyword}`;
         saveState();
-        button.scrollIntoView({ block: "center", behavior: "auto" });
-        await sleep(300);
-        button.click();
-
-        const loaded = await waitForNewProducts(beforeKeys);
-        if (loaded.stopped || stopRequested) {
-          state.stopReason = "用户手动停止";
-          break;
-        }
-        if (loaded.newUniqueCount <= 0) {
-          noGrowthRounds += 1;
-          state.status = `See more 未检测到新增商品（${noGrowthRounds}/${MAX_NO_GROWTH_ROUNDS}）`;
-          saveState();
-          if (noGrowthRounds >= MAX_NO_GROWTH_ROUNDS) {
-            state.stopReason = `连续 ${MAX_NO_GROWTH_ROUNDS} 次点击没有新增唯一商品`;
-            break;
+        await submitKeywordSearch(keyword);
+        const initial = await waitForYunqiData(1, SEARCH_RESULT_TIMEOUT_MS);
+        if (!initial.yunqiCardCount)
+          throw new Error(`关键词“${keyword}”未读取到云启数据`);
+        mergeCollectedRecords(initial.records, 1);
+        queueBatchPage(1, initial.records);
+        let noGrowthRounds = 0;
+        while (!stopRequested && state.keywordLoads < state.maxLoads) {
+          window.scrollTo({
+            top: document.documentElement.scrollHeight,
+            behavior: "auto",
+          });
+          await sleep(800);
+          const button = findSeeMoreButton();
+          if (isButtonUnavailable(button)) break;
+          const beforeKeys = currentVisibleKeys();
+          button.scrollIntoView({ block: "center", behavior: "auto" });
+          await sleep(300);
+          button.click();
+          const loaded = await waitForNewProducts(beforeKeys);
+          if (loaded.stopped || stopRequested) break;
+          if (loaded.newUniqueCount <= 0) {
+            noGrowthRounds += 1;
+            if (noGrowthRounds >= MAX_NO_GROWTH_ROUNDS) break;
+            continue;
           }
-          await sleep(1500);
-          continue;
+          noGrowthRounds = 0;
+          state.keywordLoads += 1;
+          state.successfulLoads += 1;
+          state.currentSourcePage = state.keywordLoads + 1;
+          await sleep(POST_LOAD_YUNQI_WAIT_MS);
+          const settled = associateProducts();
+          mergeCollectedRecords(settled.records, state.currentSourcePage);
+          queueBatchPage(state.currentSourcePage, settled.records);
+          if (state.keywordLoads % 2 === 0) await flushPendingBatch();
+          state.status = `关键词“${keyword}”已翻页 ${state.keywordLoads}/${state.maxLoads}`;
+          saveState();
         }
-
-        noGrowthRounds = 0;
-        state.successfulLoads += 1;
-        state.currentSourcePage = state.successfulLoads + 1;
-        state.status = `第 ${state.currentSourcePage} 页商品已追加，等待 5 秒让云启数据加载`;
-        saveState();
-        await sleep(POST_LOAD_YUNQI_WAIT_MS);
-        if (stopRequested) {
-          state.stopReason = "用户手动停止";
-          break;
-        }
-        const settled = associateProducts();
-        const mergeResult = mergeCollectedRecords(
-          settled.records,
-          state.currentSourcePage,
-        );
-        await uploadPageWithRetry(state.currentSourcePage, settled.records);
-        state.status = `第 ${state.currentSourcePage} 页完成并上传：新增 ${mergeResult.added} 条，累计 ${state.records.length} 条`;
-        saveState();
-        await sleep(1000 + Math.floor(Math.random() * 1001));
+        await flushPendingBatch();
+        if (stopRequested) break;
       }
-
-      if (stopRequested && !state.stopReason) {
-        state.stopReason = "用户手动停止";
-      } else if (state.successfulLoads >= state.maxLoads && !state.stopReason) {
-        state.stopReason = `已达到最大成功翻页次数 ${state.maxLoads}`;
-      }
-      state.status = `采集结束：${state.stopReason || "已完成"}`;
+      state.stopReason = stopRequested ? "用户手动停止" : "全部关键词已完成";
+      state.status = `采集结束：${state.stopReason}`;
     } catch (error) {
-      state.stopReason = error.message;
-      state.status = `采集失败：${error.message}`;
-      console.error(`[${SCRIPT_NAME}]`, error);
+      if (error.message !== "COLLECTOR_PAUSED") {
+        state.stopReason = error.message;
+        state.status = `采集失败：${error.message}`;
+        console.error(`[${SCRIPT_NAME}]`, error);
+      }
     } finally {
       state.active = false;
       saveState();
     }
+  }
+
+  function continueCollector() {
+    if (!state.paused || state.active) return;
+    runCollector();
   }
 
   function stopCollector() {
@@ -1244,6 +1340,8 @@
         panel.querySelector("#zoo-temu-group-name").value,
       ),
       selectedGroupId: panel.querySelector("#zoo-temu-group").value,
+      keywordsInput: panel.querySelector("#zoo-temu-keywords").value,
+      sameGroup: panel.querySelector("#zoo-temu-same-group").checked,
     };
     if (!config.baseUrl || !config.apiToken) {
       state.status = "请填写后台地址，并粘贴与 1688 相同的个人采集令牌";
@@ -1255,6 +1353,8 @@
     panel.querySelector("#zoo-temu-api-url").value = config.baseUrl;
     panel.querySelector("#zoo-temu-api-token").value = config.apiToken;
     panel.querySelector("#zoo-temu-group-name").value = config.groupNameInput;
+    panel.querySelector("#zoo-temu-keywords").value = config.keywordsInput;
+    panel.querySelector("#zoo-temu-same-group").checked = config.sameGroup;
     panel.querySelector("#zoo-temu-max-loads").value = String(state.maxLoads);
 
     state.status = "配置已保存，正在验证统一令牌并加载 Temu 分组";
@@ -1419,7 +1519,10 @@
       }
       #${PANEL_ID} .zoo-value { font-weight: 700; text-align: right; }
       #${PANEL_ID} .zoo-field { display: grid; gap: 4px; margin: 8px 0; }
-      #${PANEL_ID} input, #${PANEL_ID} select { width: 100%; padding: 6px 7px; border: 1px solid #bbb; border-radius: 5px; }
+      #${PANEL_ID} input, #${PANEL_ID} select, #${PANEL_ID} textarea { width: 100%; padding: 6px 7px; border: 1px solid #bbb; border-radius: 5px; }
+      #${PANEL_ID} textarea { min-height: 78px; resize: vertical; }
+      #${PANEL_ID} .zoo-check { display: flex; gap: 7px; align-items: center; margin: 8px 0; }
+      #${PANEL_ID} .zoo-check input { width: auto; }
       #${PANEL_ID} .zoo-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
       #${PANEL_ID} button {
         padding: 7px 8px;
@@ -1467,8 +1570,10 @@
       </div>
       <label class="zoo-field"><span>后台地址</span><input id="zoo-temu-api-url" value="${loadApiConfig().baseUrl}" placeholder="与 1688 采集器相同"></label>
       <label class="zoo-field"><span>统一个人采集令牌</span><input id="zoo-temu-api-token" type="password" value="${loadApiConfig().apiToken}" placeholder="粘贴 1688 使用的 zoo_... 令牌"></label>
+      <label class="zoo-field"><span>搜索关键词（每行一个）</span><textarea id="zoo-temu-keywords" placeholder="dresses for women\nwomen shoes">${loadApiConfig().keywordsInput}</textarea></label>
+      <label class="zoo-check"><input id="zoo-temu-same-group" type="checkbox" ${loadApiConfig().sameGroup ? "checked" : ""}><span>所有关键词归类到同一分组</span></label>
       <label class="zoo-field"><span>已有 Temu 分组</span><select id="zoo-temu-group"><option value="">请先保存配置并加载</option></select></label>
-      <label class="zoo-field"><span>分组名称（存在则复用）</span><input id="zoo-temu-group-name" value="${loadApiConfig().groupNameInput}" placeholder="例如：女装趋势"></label>
+      <label class="zoo-field"><span>统一分组名称（同组模式）</span><input id="zoo-temu-group-name" value="${loadApiConfig().groupNameInput}" placeholder="例如：女装趋势"></label>
       <label class="zoo-field">
         <span>最大成功翻页次数</span>
         <input id="zoo-temu-max-loads" type="number" min="0" max="10000" value="${state.maxLoads}">
@@ -1476,6 +1581,7 @@
       <div class="zoo-actions">
         <button type="button" class="zoo-save" data-action="save">保存配置并加载分组</button>
         <button type="button" data-action="start">开始采集</button>
+        <button type="button" data-action="continue">继续</button>
         <button type="button" class="zoo-stop" data-action="stop">停止</button>
         <button type="button" class="zoo-export" data-action="export">导出 CSV</button>
         <button type="button" class="zoo-clear" data-action="clear">清空状态</button>
@@ -1490,6 +1596,9 @@
     panel
       .querySelector('[data-action="start"]')
       .addEventListener("click", runCollector);
+    panel
+      .querySelector('[data-action="continue"]')
+      .addEventListener("click", continueCollector);
     panel
       .querySelector('[data-action="stop"]')
       .addEventListener("click", stopCollector);
@@ -1534,6 +1643,8 @@
     }
     panel.querySelector('[data-action="save"]').disabled = state.active;
     panel.querySelector('[data-action="start"]').disabled = state.active;
+    panel.querySelector('[data-action="continue"]').disabled =
+      state.active || !state.paused;
     panel.querySelector('[data-action="stop"]').disabled = !state.active;
     panel.querySelector('[data-action="export"]').disabled =
       state.records.length === 0;

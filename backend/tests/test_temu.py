@@ -1,9 +1,11 @@
 import asyncio
 from datetime import date
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 
 import httpx
+from openpyxl import load_workbook
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -16,12 +18,16 @@ from app.models import (
     TemuImageSearchResult,
     TemuImageSearchResultItem,
     TemuImageSearchTask,
+    TemuGroupMembership,
     TemuProduct,
+    TemuProductFavorite,
+    TemuProductGroup,
     TemuProductSnapshot,
 )
 from app.schemas import TemuIngestBatchRequest, TemuIngestProduct
 from app.temu_image_download_services import enqueue_temu_image_scope
 from app.temu_image_search_client import cancel_remote_tasks
+from app.temu_favorite_services import build_favorites_workbook, set_temu_favorite
 from app.temu_image_search_services import (
     claim_temu_image_search,
     config_payload,
@@ -639,6 +645,56 @@ def test_cancel_remote_tasks_reports_failure_and_continues():
         "/api/v1/product-tasks/product-2",
         "/api/v1/upload-tasks/upload-2",
     ]
+
+
+def test_temu_favorites_are_owner_scoped_and_export_top1():
+    with create_session() as db:
+        owner = create_user(db, "favorite-owner")
+        other = create_user(db, "favorite-other")
+        group = TemuProductGroup(
+            owner_id=owner.id,
+            name="收藏分组",
+            normalized_name="收藏分组",
+        )
+        db.add(group)
+        db.flush()
+        product = TemuProduct(
+            temu_product_id="990001",
+            title="收藏产品",
+            product_url="https://www.temu.com/goods.html?goods_id=990001",
+            image_url="https://img.example.com/favorite.jpg",
+            daily_sales=12,
+            weekly_sales=34,
+            monthly_sales=0,
+            total_sales=100,
+            is_ad=False,
+        )
+        db.add(product)
+        db.flush()
+        db.add(TemuGroupMembership(owner_id=owner.id, product_id=product.id, group_id=group.id))
+        db.commit()
+
+        assert set_temu_favorite(db, owner.id, product.id, True) is True
+        assert set_temu_favorite(db, owner.id, product.id, True) is True
+        assert db.scalar(select(TemuProductFavorite).where(TemuProductFavorite.owner_id == owner.id))
+        try:
+            set_temu_favorite(db, other.id, product.id, True)
+            assert False, "other owner must not favorite inaccessible product"
+        except LookupError:
+            pass
+
+        content, total = build_favorites_workbook(
+            db, owner.id, TemuFilters(include_ads=True), "daily_sales", "desc"
+        )
+        assert total == 1
+        workbook = load_workbook(BytesIO(content), data_only=False)
+        sheet = workbook.active
+        assert sheet["A2"].value == "收藏产品"
+        assert str(sheet["B2"].value).startswith('=IFERROR(IMAGE(')
+        assert sheet["H2"].value in {None, ""}
+
+        assert set_temu_favorite(db, owner.id, product.id, False) is False
+        assert db.scalar(select(TemuProductFavorite).where(TemuProductFavorite.owner_id == owner.id)) is None
 
 
 def test_temu_list_hides_ads_by_default_and_derives_shop_type():

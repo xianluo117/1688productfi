@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from io import BytesIO
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -24,6 +26,8 @@ from .models import (
 from .schemas import (
     GroupCreate,
     IngestBatchResponse,
+    TemuFavoriteResponse,
+    TemuFavoriteUpdate,
     SortDirection,
     TemuGroupResponse,
     TemuGroupUpdate,
@@ -35,15 +39,93 @@ from .schemas import (
 )
 from .temu_services import (
     TemuFilters,
+    attach_temu_scope_metadata,
     get_or_create_temu_group,
     ingest_temu_batch,
     list_temu_group_products,
+    list_temu_products,
     temu_product_to_item,
+)
+from .temu_favorite_services import (
+    build_favorites_workbook,
+    favorite_count,
+    set_temu_favorite,
 )
 from .services import product_to_item
 from .temu_image_search_services import image_search_summaries
 
 router = APIRouter(prefix="/api/temu", tags=["temu"])
+
+
+def temu_filters(
+    search: str | None = None,
+    daily_sales_min: int | None = Query(None, ge=0),
+    daily_sales_max: int | None = Query(None, ge=0),
+    weekly_sales_min: int | None = Query(None, ge=0),
+    weekly_sales_max: int | None = Query(None, ge=0),
+    total_sales_min: int | None = Query(None, ge=0),
+    total_sales_max: int | None = Query(None, ge=0),
+    sale_price_min: Decimal | None = Query(None, ge=0),
+    sale_price_max: Decimal | None = Query(None, ge=0),
+    original_price_min: Decimal | None = Query(None, ge=0),
+    original_price_max: Decimal | None = Query(None, ge=0),
+    listing_date_from: date | None = None,
+    listing_date_to: date | None = None,
+    listed_days_min: int | None = Query(None, ge=0),
+    listed_days_max: int | None = Query(None, ge=0),
+    shop_type: str | None = None,
+    include_ads: bool = False,
+    collected_at_from: datetime | None = None,
+    collected_at_to: datetime | None = None,
+) -> TemuFilters:
+    return TemuFilters(
+        search=search,
+        daily_sales_min=daily_sales_min,
+        daily_sales_max=daily_sales_max,
+        weekly_sales_min=weekly_sales_min,
+        weekly_sales_max=weekly_sales_max,
+        total_sales_min=total_sales_min,
+        total_sales_max=total_sales_max,
+        sale_price_min=sale_price_min,
+        sale_price_max=sale_price_max,
+        original_price_min=original_price_min,
+        original_price_max=original_price_max,
+        listing_date_from=listing_date_from,
+        listing_date_to=listing_date_to,
+        listed_days_min=listed_days_min,
+        listed_days_max=listed_days_max,
+        shop_type=shop_type,
+        include_ads=include_ads,
+        collected_at_from=collected_at_from,
+        collected_at_to=collected_at_to,
+    )
+
+
+def product_page_response(
+    db: Session,
+    products: list[TemuProduct],
+    total: int,
+    page: int,
+    page_size: int,
+    sort_field: str,
+    sort_direction: str,
+) -> TemuProductPage:
+    search_summaries = image_search_summaries(db, [product.id for product in products])
+    items = []
+    for product in products:
+        item = temu_product_to_item(product)
+        summary = search_summaries.get(product.id)
+        if summary:
+            item.image_search = {**summary, "products": summary["products"][:1]}
+        items.append(item)
+    return TemuProductPage(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        sort_field=sort_field,
+        sort_direction=sort_direction,
+    )
 
 
 def resolve_owner_id(current_user: AdminUser, requested_owner_id: int | None) -> int:
@@ -224,22 +306,119 @@ def group_products(
     products, total = list_temu_group_products(
         db, group.id, group.owner_id, page, page_size, resolved_field, resolved_direction, filters
     )
-    search_summaries = image_search_summaries(db, [product.id for product in products])
-    items = []
-    for product in products:
-        item = temu_product_to_item(product)
-        summary = search_summaries.get(product.id)
-        if summary:
-            summary = {**summary, "products": summary["products"][:1]}
-            item.image_search = summary
-        items.append(item)
-    return TemuProductPage(
-        items=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        sort_field=resolved_field,
-        sort_direction=resolved_direction,
+    return product_page_response(
+        db,
+        products,
+        total,
+        page,
+        page_size,
+        resolved_field,
+        resolved_direction,
+    )
+
+
+@router.get("/products", response_model=TemuProductPage)
+def all_products(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    filters: Annotated[TemuFilters, Depends(temu_filters)],
+    owner_id: int | None = Query(default=None, gt=0),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    sort_field: TemuSortField = "daily_sales",
+    sort_direction: SortDirection = "desc",
+) -> TemuProductPage:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    products, total = list_temu_products(
+        db,
+        resolved_owner,
+        page,
+        page_size,
+        sort_field,
+        sort_direction,
+        filters,
+    )
+    return product_page_response(
+        db, products, total, page, page_size, sort_field, sort_direction
+    )
+
+
+@router.get("/favorites", response_model=TemuProductPage)
+def favorite_products(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    filters: Annotated[TemuFilters, Depends(temu_filters)],
+    owner_id: int | None = Query(default=None, gt=0),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    sort_field: TemuSortField = "daily_sales",
+    sort_direction: SortDirection = "desc",
+) -> TemuProductPage:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    products, total = list_temu_products(
+        db,
+        resolved_owner,
+        page,
+        page_size,
+        sort_field,
+        sort_direction,
+        filters,
+        favorites_only=True,
+    )
+    return product_page_response(
+        db, products, total, page, page_size, sort_field, sort_direction
+    )
+
+
+@router.get("/favorites/count", response_model=dict[str, int])
+def favorites_count(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    owner_id: int | None = Query(default=None, gt=0),
+) -> dict[str, int]:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    return {"count": favorite_count(db, resolved_owner)}
+
+
+@router.put("/products/{product_id}/favorite", response_model=TemuFavoriteResponse)
+def update_product_favorite(
+    product_id: int,
+    payload: TemuFavoriteUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    owner_id: int | None = Query(default=None, gt=0),
+) -> TemuFavoriteResponse:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    try:
+        is_favorite = set_temu_favorite(
+            db, resolved_owner, product_id, payload.favorite
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Temu 商品不存在") from exc
+    return TemuFavoriteResponse(product_id=product_id, is_favorite=is_favorite)
+
+
+@router.get("/favorites/export")
+def export_favorites(
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    filters: Annotated[TemuFilters, Depends(temu_filters)],
+    owner_id: int | None = Query(default=None, gt=0),
+    sort_field: TemuSortField = "daily_sales",
+    sort_direction: SortDirection = "desc",
+) -> StreamingResponse:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    content, total = build_favorites_workbook(
+        db, resolved_owner, filters, sort_field, sort_direction
+    )
+    if total == 0:
+        raise HTTPException(status_code=404, detail="当前筛选条件下没有收藏产品")
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": 'attachment; filename="temu-favorites.xlsx"'
+        },
     )
 
 
@@ -286,10 +465,11 @@ def product_detail(
     source_products = list(db.scalars(select(Product).join(
         CrossPlatformProductRelation, CrossPlatformProductRelation.product_id == Product.id
     ).where(CrossPlatformProductRelation.temu_product_id == product.id).order_by(Product.total_pieces.desc())))
+    attach_temu_scope_metadata(db, [product], resolved_owner)
     item = temu_product_to_item(product)
     item.image_search = image_search_summaries(db, [product.id]).get(product.id)
     return TemuProductDetail(
-        **item.model_dump(),
+        **item.model_dump(exclude={"groups"}),
         groups=[TemuGroupResponse.model_validate(group) for group in groups],
         snapshots=[TemuSnapshotResponse.model_validate(snapshot) for snapshot in snapshots],
         platform_same_products=[temu_product_to_item(item) for item in same_products],

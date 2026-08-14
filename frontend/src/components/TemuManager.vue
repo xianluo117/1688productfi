@@ -11,7 +11,9 @@ const emit = defineEmits(["home", "logout"]);
 const isAdmin = computed(() => props.user.role === "admin");
 const selectedOwnerId = ref(props.user.id);
 const groups = ref([]);
+const selectedScope = ref("all");
 const selectedGroupId = ref(null);
+const favoriteCount = ref(0);
 const products = ref([]);
 const detail = ref(null);
 const detailLoading = ref(false);
@@ -45,6 +47,11 @@ const filters = reactive({
 const selectedGroup = computed(() =>
   groups.value.find((group) => group.id === selectedGroupId.value),
 );
+const scopeTitle = computed(() => {
+  if (selectedScope.value === "all") return "全部产品";
+  if (selectedScope.value === "favorites") return "收藏产品";
+  return selectedGroup.value?.name || "Temu 产品";
+});
 const totalPages = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize)),
 );
@@ -53,18 +60,27 @@ async function loadGroups() {
   const params = new URLSearchParams();
   if (isAdmin.value) params.set("owner_id", selectedOwnerId.value);
   groups.value = await api(`/api/temu/groups?${params}`);
-  if (!groups.value.length) {
-    selectedGroupId.value = null;
-    products.value = [];
-    total.value = 0;
-    return;
-  }
-  if (!groups.value.some((group) => group.id === selectedGroupId.value))
-    selectGroup(groups.value[0]);
-  else await loadProducts();
+  const count = await api(`/api/temu/favorites/count?${params}`);
+  favoriteCount.value = count.count;
+  if (
+    selectedScope.value === "group" &&
+    !groups.value.some((group) => group.id === selectedGroupId.value)
+  ) {
+    selectScope("all");
+  } else await loadProducts();
+}
+
+function selectScope(scope) {
+  selectedScope.value = scope;
+  selectedGroupId.value = null;
+  page.value = 1;
+  detail.value = null;
+  showMoreImageSearch.value = false;
+  loadProducts();
 }
 
 function selectGroup(group) {
+  selectedScope.value = "group";
   selectedGroupId.value = group.id;
   sort.field = group.default_sort_field;
   sort.direction = group.default_sort_direction;
@@ -88,7 +104,7 @@ async function createGroup() {
 }
 
 async function loadProducts() {
-  if (!selectedGroupId.value) return;
+  if (selectedScope.value === "group" && !selectedGroupId.value) return;
   loading.value = true;
   try {
     const params = new URLSearchParams({
@@ -101,9 +117,14 @@ async function loadProducts() {
     Object.entries(filters).forEach(([name, value]) => {
       if (name !== "include_ads") appendQuery(params, name, value);
     });
-    const result = await api(
-      `/api/temu/groups/${selectedGroupId.value}/products?${params}`,
-    );
+    if (isAdmin.value) params.set("owner_id", selectedOwnerId.value);
+    const endpoint =
+      selectedScope.value === "group"
+        ? `/api/temu/groups/${selectedGroupId.value}/products`
+        : selectedScope.value === "favorites"
+          ? "/api/temu/favorites"
+          : "/api/temu/products";
+    const result = await api(`${endpoint}?${params}`);
     products.value = result.items;
     total.value = result.total;
   } finally {
@@ -143,14 +164,59 @@ async function toggleSort(field) {
     sort.field === field && sort.direction === "desc" ? "asc" : "desc";
   sort.field = field;
   page.value = 1;
-  await api(`/api/temu/groups/${selectedGroupId.value}`, {
-    method: "PUT",
-    body: JSON.stringify({
-      default_sort_field: sort.field,
-      default_sort_direction: sort.direction,
-    }),
-  });
+  if (selectedScope.value === "group") {
+    await api(`/api/temu/groups/${selectedGroupId.value}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        default_sort_field: sort.field,
+        default_sort_direction: sort.direction,
+      }),
+    });
+  }
   await loadProducts();
+}
+
+async function toggleFavorite(product) {
+  const owner = isAdmin.value ? `?owner_id=${selectedOwnerId.value}` : "";
+  const result = await api(
+    `/api/temu/products/${product.id}/favorite${owner}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ favorite: !product.is_favorite }),
+    },
+  );
+  product.is_favorite = result.is_favorite;
+  favoriteCount.value += result.is_favorite ? 1 : -1;
+  if (selectedScope.value === "favorites" && !result.is_favorite) {
+    products.value = products.value.filter((item) => item.id !== product.id);
+    total.value = Math.max(0, total.value - 1);
+  }
+}
+
+async function exportFavorites() {
+  const params = new URLSearchParams({
+    sort_field: sort.field,
+    sort_direction: sort.direction,
+    include_ads: filters.include_ads,
+  });
+  Object.entries(filters).forEach(([name, value]) => {
+    if (name !== "include_ads") appendQuery(params, name, value);
+  });
+  if (isAdmin.value) params.set("owner_id", selectedOwnerId.value);
+  const response = await fetch(`/api/temu/favorites/export?${params}`, {
+    credentials: "include",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || `导出失败：${response.status}`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `temu-favorites-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function sortMark(field) {
@@ -218,9 +284,23 @@ onMounted(loadGroups);
       </div>
       <nav>
         <button
+          :class="{ active: selectedScope === 'all' }"
+          @click="selectScope('all')"
+        >
+          全部产品
+        </button>
+        <button
+          :class="{ active: selectedScope === 'favorites' }"
+          @click="selectScope('favorites')"
+        >
+          收藏产品（{{ favoriteCount }}）
+        </button>
+        <button
           v-for="group in groups"
           :key="group.id"
-          :class="{ active: group.id === selectedGroupId }"
+          :class="{
+            active: selectedScope === 'group' && group.id === selectedGroupId,
+          }"
           @click="selectGroup(group)"
         >
           {{ group.name }}
@@ -232,15 +312,14 @@ onMounted(loadGroups);
     <section class="content">
       <header>
         <div>
-          <h2>{{ selectedGroup?.name || "请先创建 Temu 分组" }}</h2>
-          <span v-if="selectedGroup">共 {{ total }} 个商品</span>
+          <h2>{{ scopeTitle }}</h2>
+          <span>共 {{ total }} 个商品</span>
         </div>
+        <button v-if="selectedScope === 'favorites'" @click="exportFavorites">
+          导出当前筛选 XLSX
+        </button>
       </header>
-      <form
-        v-if="selectedGroup"
-        class="filters temu-filters"
-        @submit.prevent="applyFilters"
-      >
+      <form class="filters temu-filters" @submit.prevent="applyFilters">
         <label class="single"
           >搜索<input v-model="filters.search" placeholder="商品 ID 或标题"
         /></label>
@@ -334,7 +413,7 @@ onMounted(loadGroups);
         </div>
       </form>
 
-      <div v-if="selectedGroup" class="table-wrap">
+      <div class="table-wrap">
         <table>
           <thead>
             <tr>
@@ -362,6 +441,7 @@ onMounted(loadGroups);
                 上架时间{{ sortMark("listing_date") }}
               </th>
               <th>上架天数</th>
+              <th>所属分组</th>
               <th>店铺类型</th>
               <th>操作</th>
             </tr>
@@ -451,12 +531,24 @@ onMounted(loadGroups);
               <td>{{ product.listing_date || "-" }}</td>
               <td>{{ product.listed_days ?? "-" }}</td>
               <td>
+                <span
+                  v-for="group in product.groups"
+                  :key="group.id"
+                  class="temu-group-tag"
+                  >{{ group.name }}</span
+                >
+                <span v-if="!product.groups?.length" class="muted">-</span>
+              </td>
+              <td>
                 <span class="shop-type-badge">{{
                   product.derived_shop_type || "-"
                 }}</span
                 ><span v-if="product.is_ad" class="ad-badge">广告</span>
               </td>
-              <td>
+              <td class="temu-row-actions">
+                <button @click="toggleFavorite(product)">
+                  {{ product.is_favorite ? "取消收藏" : "收藏" }}
+                </button>
                 <button :disabled="detailLoading" @click="showDetail(product)">
                   {{ detailLoading ? "加载中" : "详情" }}
                 </button>
@@ -469,7 +561,7 @@ onMounted(loadGroups);
           暂无符合条件的 Temu 商品
         </p>
       </div>
-      <div v-if="selectedGroup" class="pagination">
+      <div class="pagination">
         <button :disabled="page <= 1" @click="page--">上一页</button
         ><span>{{ page }} / {{ totalPages }}</span
         ><button :disabled="page >= totalPages" @click="page++">下一页</button>

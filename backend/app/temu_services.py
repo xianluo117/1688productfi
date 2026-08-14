@@ -15,6 +15,7 @@ from .models import (
     TemuCollectionBatch,
     TemuGroupMembership,
     TemuProduct,
+    TemuProductFavorite,
     TemuProductGroup,
     TemuProductSnapshot,
     TemuSimilarityClusterMember,
@@ -108,6 +109,8 @@ def temu_product_to_item(product: TemuProduct) -> TemuProductListItem:
         last_collected_at=product.last_collected_at,
         cluster_id=getattr(product, "cluster_id", None),
         cluster_member_count=getattr(product, "cluster_member_count", 1),
+        groups=getattr(product, "scope_groups", []),
+        is_favorite=getattr(product, "is_favorite", False),
     )
 
 
@@ -313,6 +316,111 @@ def apply_temu_filters(statement, filters: TemuFilters):
     return statement
 
 
+def attach_temu_scope_metadata(
+    db: Session,
+    products: list[TemuProduct],
+    owner_id: int,
+) -> None:
+    product_ids = [product.id for product in products]
+    if not product_ids:
+        return
+    groups_by_product: dict[int, list[dict[str, object]]] = {}
+    for product_id, group_id, group_name in db.execute(
+        select(
+            TemuGroupMembership.product_id,
+            TemuProductGroup.id,
+            TemuProductGroup.name,
+        )
+        .join(TemuProductGroup, TemuProductGroup.id == TemuGroupMembership.group_id)
+        .where(
+            TemuGroupMembership.owner_id == owner_id,
+            TemuGroupMembership.product_id.in_(product_ids),
+        )
+        .order_by(TemuProductGroup.name.asc())
+    ):
+        groups_by_product.setdefault(product_id, []).append(
+            {"id": group_id, "name": group_name}
+        )
+    favorite_ids = set(
+        db.scalars(
+            select(TemuProductFavorite.product_id).where(
+                TemuProductFavorite.owner_id == owner_id,
+                TemuProductFavorite.product_id.in_(product_ids),
+            )
+        )
+    )
+    for product in products:
+        product.scope_groups = groups_by_product.get(product.id, [])
+        product.is_favorite = product.id in favorite_ids
+
+
+def list_temu_products(
+    db: Session,
+    owner_id: int,
+    page: int,
+    page_size: int,
+    sort_field: str,
+    sort_direction: str,
+    filters: TemuFilters,
+    *,
+    group_id: int | None = None,
+    favorites_only: bool = False,
+) -> tuple[list[TemuProduct], int]:
+    scope_filters = [
+        TemuProduct.memberships.any(TemuGroupMembership.owner_id == owner_id)
+    ]
+    if group_id is not None:
+        scope_filters.append(
+            TemuProduct.memberships.any(
+                and_(
+                    TemuGroupMembership.group_id == group_id,
+                    TemuGroupMembership.owner_id == owner_id,
+                )
+            )
+        )
+    if favorites_only:
+        scope_filters.append(
+            TemuProduct.favorites.any(TemuProductFavorite.owner_id == owner_id)
+        )
+    cluster_counts = (
+        select(
+            TemuSimilarityClusterMember.product_id.label("cluster_product_id"),
+            TemuSimilarityClusterMember.cluster_id.label("cluster_id"),
+            func.count(TemuSimilarityClusterMember.id)
+            .over(partition_by=TemuSimilarityClusterMember.cluster_id)
+            .label("cluster_member_count"),
+        ).subquery()
+    )
+    filtered = apply_temu_filters(
+        select(
+            TemuProduct,
+            cluster_counts.c.cluster_id,
+            cluster_counts.c.cluster_member_count,
+        )
+        .outerjoin(cluster_counts, cluster_counts.c.cluster_product_id == TemuProduct.id)
+        .where(*scope_filters),
+        filters,
+    )
+    counted = apply_temu_filters(
+        select(func.count(TemuProduct.id)).where(*scope_filters), filters
+    )
+    total = int(db.scalar(counted) or 0)
+    column = TEMU_SORT_COLUMNS[sort_field]
+    order = column.asc() if sort_direction == "asc" else column.desc()
+    rows = db.execute(
+        filtered.order_by(order, TemuProduct.id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    products: list[TemuProduct] = []
+    for product, cluster_id, member_count in rows:
+        product.cluster_id = cluster_id
+        product.cluster_member_count = int(member_count or 1)
+        products.append(product)
+    attach_temu_scope_metadata(db, products, owner_id)
+    return products, total
+
+
 def list_temu_group_products(
     db: Session,
     group_id: int,
@@ -323,35 +431,13 @@ def list_temu_group_products(
     sort_direction: str,
     filters: TemuFilters,
 ) -> tuple[list[TemuProduct], int]:
-    membership_filter = TemuProduct.memberships.any(and_(
-        TemuGroupMembership.group_id == group_id,
-        TemuGroupMembership.owner_id == owner_id,
-    ))
-    cluster_counts = (
-        select(
-            TemuSimilarityClusterMember.product_id.label("cluster_product_id"),
-            TemuSimilarityClusterMember.cluster_id.label("cluster_id"),
-            func.count(TemuSimilarityClusterMember.id).over(
-                partition_by=TemuSimilarityClusterMember.cluster_id
-            ).label("cluster_member_count"),
-        ).subquery()
-    )
-    filtered = apply_temu_filters(
-        select(TemuProduct, cluster_counts.c.cluster_id, cluster_counts.c.cluster_member_count)
-        .outerjoin(cluster_counts, cluster_counts.c.cluster_product_id == TemuProduct.id)
-        .where(membership_filter),
+    return list_temu_products(
+        db,
+        owner_id,
+        page,
+        page_size,
+        sort_field,
+        sort_direction,
         filters,
+        group_id=group_id,
     )
-    counted = apply_temu_filters(select(func.count(TemuProduct.id)).where(membership_filter), filters)
-    total = db.scalar(counted) or 0
-    column = TEMU_SORT_COLUMNS[sort_field]
-    order = column.asc() if sort_direction == "asc" else column.desc()
-    rows = db.execute(
-        filtered.order_by(order, TemuProduct.id.asc()).offset((page - 1) * page_size).limit(page_size)
-    ).all()
-    products = []
-    for product, cluster_id, member_count in rows:
-        product.cluster_id = cluster_id
-        product.cluster_member_count = int(member_count or 1)
-        products.append(product)
-    return products, total

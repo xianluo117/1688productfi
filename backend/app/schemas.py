@@ -636,6 +636,11 @@ class TemuIngestBatchRequest(BaseModel):
     products: list[TemuIngestProduct]
 
 
+class TemuProductGroupSummary(BaseModel):
+    id: int
+    name: str
+
+
 class TemuProductListItem(BaseModel):
     id: int
     temu_product_id: str
@@ -670,6 +675,8 @@ class TemuProductListItem(BaseModel):
     last_collected_at: datetime
     cluster_id: int | None = None
     cluster_member_count: int = 1
+    groups: list[TemuProductGroupSummary] = Field(default_factory=list)
+    is_favorite: bool = False
     image_search: TemuImageSearchSummaryResponse | None = None
 
 
@@ -680,6 +687,15 @@ class TemuProductPage(BaseModel):
     page_size: int
     sort_field: str
     sort_direction: str
+
+
+class TemuFavoriteUpdate(BaseModel):
+    favorite: bool
+
+
+class TemuFavoriteResponse(BaseModel):
+    product_id: int
+    is_favorite: bool
 
 
 class TemuSnapshotResponse(BaseModel):

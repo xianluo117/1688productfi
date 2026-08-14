@@ -161,6 +161,9 @@ class TemuProduct(Base):
 
     memberships: Mapped[list[TemuGroupMembership]] = relationship(back_populates="product", cascade="all, delete-orphan")
     snapshots: Mapped[list[TemuProductSnapshot]] = relationship(back_populates="product", cascade="all, delete-orphan")
+    favorites: Mapped[list[TemuProductFavorite]] = relationship(
+        back_populates="product", cascade="all, delete-orphan"
+    )
 
 
 class TemuProductGroup(Base):
@@ -191,6 +194,26 @@ class TemuGroupMembership(Base):
 
     product: Mapped[TemuProduct] = relationship(back_populates="memberships")
     group: Mapped[TemuProductGroup] = relationship(back_populates="memberships")
+
+
+class TemuProductFavorite(Base):
+    __tablename__ = "temu_product_favorites"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "product_id", name="uq_temu_favorite_owner_product"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("temu_products.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    product: Mapped[TemuProduct] = relationship(back_populates="favorites")
 
 
 class TemuCollectionBatch(Base):
