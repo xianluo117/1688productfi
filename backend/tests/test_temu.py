@@ -48,6 +48,8 @@ from app.temu_services import (
     get_or_create_temu_group,
     ingest_temu_batch,
     list_temu_group_products,
+    remove_temu_group,
+    remove_temu_product_memberships,
 )
 
 
@@ -695,6 +697,51 @@ def test_temu_favorites_are_owner_scoped_and_export_top1():
 
         assert set_temu_favorite(db, owner.id, product.id, False) is False
         assert db.scalar(select(TemuProductFavorite).where(TemuProductFavorite.owner_id == owner.id)) is None
+
+
+def test_temu_remove_membership_preserves_shared_product_and_hard_deletes_orphan():
+    with create_session() as db:
+        owner = create_user(db, "remove-owner")
+        other = create_user(db, "remove-other")
+        first_group = TemuProductGroup(owner_id=owner.id, name="第一组", normalized_name="第一组")
+        second_group = TemuProductGroup(owner_id=owner.id, name="第二组", normalized_name="第二组")
+        other_group = TemuProductGroup(owner_id=other.id, name="其他组", normalized_name="其他组")
+        product = TemuProduct(
+            temu_product_id="remove-1",
+            title="待删除商品",
+            product_url="https://www.temu.com/remove-1",
+            image_url="https://img.example.com/remove-1.jpg",
+            daily_sales=1,
+            weekly_sales=2,
+            monthly_sales=3,
+            total_sales=4,
+            is_ad=False,
+        )
+        db.add_all([first_group, second_group, other_group, product])
+        db.flush()
+        db.add_all([
+            TemuGroupMembership(owner_id=owner.id, product_id=product.id, group_id=first_group.id),
+            TemuGroupMembership(owner_id=owner.id, product_id=product.id, group_id=second_group.id),
+            TemuGroupMembership(owner_id=other.id, product_id=product.id, group_id=other_group.id),
+            TemuProductFavorite(owner_id=owner.id, product_id=product.id),
+            TemuImageDownloadTask(product_id=product.id, image_url=product.image_url),
+            TemuImageSearchTask(product_id=product.id, image_url=product.image_url),
+        ])
+        db.commit()
+
+        assert remove_temu_product_memberships(db, owner.id, product.id, group_id=first_group.id) is False
+        assert db.get(TemuProduct, product.id) is not None
+        assert db.scalar(select(TemuGroupMembership).where(TemuGroupMembership.group_id == first_group.id)) is None
+        assert db.scalar(select(TemuGroupMembership).where(TemuGroupMembership.group_id == second_group.id)) is not None
+
+        assert remove_temu_product_memberships(db, owner.id, product.id, group_id=second_group.id) is False
+        assert db.get(TemuProduct, product.id) is not None
+
+        assert remove_temu_group(db, other_group) == 1
+        assert db.get(TemuProduct, product.id) is None
+        assert db.scalar(select(TemuProductFavorite).where(TemuProductFavorite.product_id == product.id)) is None
+        assert db.scalar(select(TemuImageDownloadTask).where(TemuImageDownloadTask.product_id == product.id)) is None
+        assert db.scalar(select(TemuImageSearchTask).where(TemuImageSearchTask.product_id == product.id)) is None
 
 
 def test_temu_list_hides_ads_by_default_and_derives_shop_type():

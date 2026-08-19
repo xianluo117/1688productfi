@@ -44,6 +44,8 @@ from .temu_services import (
     ingest_temu_batch,
     list_temu_group_products,
     list_temu_products,
+    remove_temu_group,
+    remove_temu_product_memberships,
     temu_product_to_item,
 )
 from .temu_favorite_services import (
@@ -202,8 +204,7 @@ def delete_group(
     current_user: Annotated[AdminUser, Depends(get_current_user)],
 ) -> Response:
     group = get_group_or_404(db, group_id, current_user)
-    db.delete(group)
-    db.commit()
+    remove_temu_group(db, group)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -315,6 +316,41 @@ def group_products(
         resolved_field,
         resolved_direction,
     )
+
+
+@router.delete("/groups/{group_id}/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_product_from_group(
+    group_id: int,
+    product_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+) -> Response:
+    group = get_group_or_404(db, group_id, current_user)
+    try:
+        remove_temu_product_memberships(
+            db,
+            group.owner_id,
+            product_id,
+            group_id=group.id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Temu 商品不属于该分组") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete("/products/{product_id}/memberships", status_code=status.HTTP_204_NO_CONTENT)
+def remove_product_from_owner(
+    product_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    owner_id: int | None = Query(default=None, gt=0),
+) -> Response:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    try:
+        remove_temu_product_memberships(db, resolved_owner, product_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Temu 商品不属于当前用户") from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/products", response_model=TemuProductPage)

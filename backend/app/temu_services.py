@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -12,12 +12,21 @@ from .image_cache import normalize_temu_image_url
 from .temu_image_download_services import enqueue_temu_image_download
 from .models import (
     AdminUser,
+    CrossPlatformProductRelation,
+    CrossPlatformSimilarityCandidate,
     TemuCollectionBatch,
     TemuGroupMembership,
+    TemuImageDownloadTask,
+    TemuImageSearchResult,
+    TemuImageSearchResultItem,
+    TemuImageSearchTask,
+    TemuImageEmbedding,
     TemuProduct,
     TemuProductFavorite,
     TemuProductGroup,
     TemuProductSnapshot,
+    TemuSimilarityCandidate,
+    TemuSimilarityCluster,
     TemuSimilarityClusterMember,
 )
 from .schemas import TemuIngestBatchRequest, TemuProductListItem
@@ -138,6 +147,159 @@ def get_or_create_temu_group(db: Session, owner_id: int, name: str) -> tuple[Tem
         return existing, False
     db.refresh(group)
     return group, True
+
+
+def _cleanup_temu_similarity_clusters(db: Session, product_id: int) -> None:
+    cluster_ids = list(db.scalars(
+        select(TemuSimilarityClusterMember.cluster_id).where(
+            TemuSimilarityClusterMember.product_id == product_id
+        )
+    ))
+    db.execute(delete(TemuSimilarityClusterMember).where(
+        TemuSimilarityClusterMember.product_id == product_id
+    ))
+    db.flush()
+    for cluster_id in cluster_ids:
+        members = list(db.scalars(
+            select(TemuSimilarityClusterMember).where(
+                TemuSimilarityClusterMember.cluster_id == cluster_id
+            )
+        ))
+        if len(members) <= 1:
+            db.execute(delete(TemuSimilarityClusterMember).where(
+                TemuSimilarityClusterMember.cluster_id == cluster_id
+            ))
+            db.execute(delete(TemuSimilarityCluster).where(
+                TemuSimilarityCluster.id == cluster_id
+            ))
+            continue
+        representative_id = db.scalar(
+            select(TemuProduct.id)
+            .join(
+                TemuSimilarityClusterMember,
+                TemuSimilarityClusterMember.product_id == TemuProduct.id,
+            )
+            .where(TemuSimilarityClusterMember.cluster_id == cluster_id)
+            .order_by(
+                TemuProduct.total_sales.desc(),
+                TemuProduct.daily_sales.desc(),
+                TemuProduct.last_collected_at.desc(),
+                TemuProduct.id.asc(),
+            )
+            .limit(1)
+        )
+        if representative_id is not None:
+            db.execute(
+                update(TemuSimilarityCluster)
+                .where(TemuSimilarityCluster.id == cluster_id)
+                .values(representative_product_id=representative_id)
+            )
+
+
+def _hard_delete_temu_product(db: Session, product: TemuProduct) -> None:
+    product_id = product.id
+    db.execute(delete(TemuImageSearchResultItem).where(
+        TemuImageSearchResultItem.result_id.in_(
+            select(TemuImageSearchResult.id).where(
+                TemuImageSearchResult.product_id == product_id
+            )
+        )
+    ))
+    db.execute(delete(TemuImageSearchResult).where(
+        TemuImageSearchResult.product_id == product_id
+    ))
+    db.execute(delete(TemuImageSearchTask).where(
+        TemuImageSearchTask.product_id == product_id
+    ))
+    db.execute(delete(TemuImageDownloadTask).where(
+        TemuImageDownloadTask.product_id == product_id
+    ))
+    db.execute(delete(TemuProductFavorite).where(
+        TemuProductFavorite.product_id == product_id
+    ))
+    db.execute(delete(TemuProductSnapshot).where(
+        TemuProductSnapshot.product_id == product_id
+    ))
+    db.execute(delete(TemuImageEmbedding).where(
+        TemuImageEmbedding.product_id == product_id
+    ))
+    db.execute(delete(TemuSimilarityCandidate).where(
+        or_(
+            TemuSimilarityCandidate.left_product_id == product_id,
+            TemuSimilarityCandidate.right_product_id == product_id,
+        )
+    ))
+    db.execute(delete(CrossPlatformSimilarityCandidate).where(
+        CrossPlatformSimilarityCandidate.temu_product_id == product_id
+    ))
+    db.execute(delete(CrossPlatformProductRelation).where(
+        CrossPlatformProductRelation.temu_product_id == product_id
+    ))
+    _cleanup_temu_similarity_clusters(db, product_id)
+    db.execute(delete(TemuGroupMembership).where(
+        TemuGroupMembership.product_id == product_id
+    ))
+    db.delete(product)
+
+
+def remove_temu_product_memberships(
+    db: Session,
+    owner_id: int,
+    product_id: int,
+    *,
+    group_id: int | None = None,
+) -> bool:
+    product = db.get(TemuProduct, product_id)
+    if product is None:
+        raise LookupError("Temu product not found")
+    statement = delete(TemuGroupMembership).where(
+        TemuGroupMembership.owner_id == owner_id,
+        TemuGroupMembership.product_id == product_id,
+    )
+    if group_id is not None:
+        statement = statement.where(TemuGroupMembership.group_id == group_id)
+    result = db.execute(statement)
+    if result.rowcount == 0:
+        raise LookupError("Temu product membership not found")
+    db.flush()
+    remaining = db.scalar(
+        select(func.count(TemuGroupMembership.id)).where(
+            TemuGroupMembership.product_id == product_id
+        )
+    )
+    deleted_product = not remaining
+    if deleted_product:
+        _hard_delete_temu_product(db, product)
+    db.commit()
+    return deleted_product
+
+
+def remove_temu_group(
+    db: Session,
+    group: TemuProductGroup,
+) -> int:
+    product_ids = list(db.scalars(
+        select(TemuGroupMembership.product_id).where(
+            TemuGroupMembership.group_id == group.id
+        )
+    ))
+    db.delete(group)
+    db.flush()
+    deleted_count = 0
+    for product_id in product_ids:
+        product = db.get(TemuProduct, product_id)
+        if product is None:
+            continue
+        remaining = db.scalar(
+            select(func.count(TemuGroupMembership.id)).where(
+                TemuGroupMembership.product_id == product_id
+            )
+        )
+        if not remaining:
+            _hard_delete_temu_product(db, product)
+            deleted_count += 1
+    db.commit()
+    return deleted_count
 
 
 def ingest_temu_batch(

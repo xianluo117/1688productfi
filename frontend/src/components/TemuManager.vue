@@ -193,6 +193,44 @@ async function toggleFavorite(product) {
   }
 }
 
+function removalConfirmation(product, scope) {
+  const title = product.title || product.temu_product_id;
+  if (scope === "group") {
+    return `确认将商品“${title}”从分组“${selectedGroup.value?.name || "当前分组"}”移除吗？商品仍可能保留在其他分组。`;
+  }
+  return `确认将商品“${title}”从当前用户的全部 Temu 分组移除吗？如果没有其他用户或分组继续使用，该商品的收藏、图搜、相似度和跨平台关联也会被清理。`;
+}
+
+async function removeProduct(product) {
+  const scope = selectedScope.value;
+  if (!window.confirm(removalConfirmation(product, scope))) return;
+  const owner = isAdmin.value ? `?owner_id=${selectedOwnerId.value}` : "";
+  const endpoint =
+    scope === "group"
+      ? `/api/temu/groups/${selectedGroupId.value}/products/${product.id}`
+      : `/api/temu/products/${product.id}/memberships${owner}`;
+  await api(endpoint, { method: "DELETE" });
+  products.value = products.value.filter((item) => item.id !== product.id);
+  total.value = Math.max(0, total.value - 1);
+  if (detail.value?.id === product.id) detail.value = null;
+  await loadGroups();
+}
+
+async function deleteSelectedGroup() {
+  if (!selectedGroup.value) return;
+  if (
+    !window.confirm(
+      `确认删除分组“${selectedGroup.value.name}”吗？商品仅在没有其他分组归属时才会被清理。`,
+    )
+  )
+    return;
+  await api(`/api/temu/groups/${selectedGroupId.value}`, { method: "DELETE" });
+  selectedGroupId.value = null;
+  selectedScope.value = "all";
+  detail.value = null;
+  await loadGroups();
+}
+
 async function exportFavorites() {
   const params = new URLSearchParams({
     sort_field: sort.field,
@@ -315,9 +353,18 @@ onMounted(loadGroups);
           <h2>{{ scopeTitle }}</h2>
           <span>共 {{ total }} 个商品</span>
         </div>
-        <button v-if="selectedScope === 'favorites'" @click="exportFavorites">
-          导出当前筛选 XLSX
-        </button>
+        <div class="temu-row-actions">
+          <button
+            v-if="selectedScope === 'group'"
+            class="danger"
+            @click="deleteSelectedGroup"
+          >
+            删除分组
+          </button>
+          <button v-if="selectedScope === 'favorites'" @click="exportFavorites">
+            导出当前筛选 XLSX
+          </button>
+        </div>
       </header>
       <form class="filters temu-filters" @submit.prevent="applyFilters">
         <label class="single"
@@ -551,6 +598,9 @@ onMounted(loadGroups);
                 </button>
                 <button :disabled="detailLoading" @click="showDetail(product)">
                   {{ detailLoading ? "加载中" : "详情" }}
+                </button>
+                <button class="danger" @click="removeProduct(product)">
+                  {{ selectedScope === "group" ? "移出分组" : "移出全部分组" }}
                 </button>
               </td>
             </tr>
