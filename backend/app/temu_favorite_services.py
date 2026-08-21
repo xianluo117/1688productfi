@@ -4,7 +4,7 @@ from io import BytesIO
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,50 @@ def set_temu_favorite(
         db.delete(existing)
         db.commit()
     return favorite
+
+
+def set_temu_favorites_batch(
+    db: Session,
+    owner_id: int,
+    product_ids: list[int],
+    favorite: bool,
+) -> int:
+    unique_ids = list(dict.fromkeys(product_ids))
+    accessible_ids = set(
+        db.scalars(
+            select(TemuGroupMembership.product_id)
+            .where(
+                TemuGroupMembership.owner_id == owner_id,
+                TemuGroupMembership.product_id.in_(unique_ids),
+            )
+            .distinct()
+        )
+    )
+    if accessible_ids != set(unique_ids):
+        raise LookupError("Temu product not found")
+    if favorite:
+        existing_ids = set(
+            db.scalars(
+                select(TemuProductFavorite.product_id).where(
+                    TemuProductFavorite.owner_id == owner_id,
+                    TemuProductFavorite.product_id.in_(unique_ids),
+                )
+            )
+        )
+        for product_id in unique_ids:
+            if product_id not in existing_ids:
+                db.add(
+                    TemuProductFavorite(owner_id=owner_id, product_id=product_id)
+                )
+    else:
+        db.execute(
+            delete(TemuProductFavorite).where(
+                TemuProductFavorite.owner_id == owner_id,
+                TemuProductFavorite.product_id.in_(unique_ids),
+            )
+        )
+    db.commit()
+    return len(unique_ids)
 
 
 def favorite_count(db: Session, owner_id: int) -> int:

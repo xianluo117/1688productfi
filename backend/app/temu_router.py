@@ -26,6 +26,8 @@ from .models import (
 from .schemas import (
     GroupCreate,
     IngestBatchResponse,
+    TemuFavoriteBatchResponse,
+    TemuFavoriteBatchUpdate,
     TemuFavoriteResponse,
     TemuFavoriteUpdate,
     SortDirection,
@@ -52,6 +54,7 @@ from .temu_favorite_services import (
     build_favorites_workbook,
     favorite_count,
     set_temu_favorite,
+    set_temu_favorites_batch,
 )
 from .services import product_to_item
 from .temu_image_search_services import image_search_summaries
@@ -414,6 +417,29 @@ def favorites_count(
 ) -> dict[str, int]:
     resolved_owner = resolve_owner_id(current_user, owner_id)
     return {"count": favorite_count(db, resolved_owner)}
+
+
+@router.put("/products/favorites/batch", response_model=TemuFavoriteBatchResponse)
+def update_product_favorites_batch(
+    payload: TemuFavoriteBatchUpdate,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[AdminUser, Depends(get_current_user)],
+    owner_id: int | None = Query(default=None, gt=0),
+) -> TemuFavoriteBatchResponse:
+    resolved_owner = resolve_owner_id(current_user, owner_id)
+    try:
+        updated = set_temu_favorites_batch(
+            db,
+            resolved_owner,
+            payload.product_ids,
+            payload.favorite,
+        )
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="部分 Temu 商品不存在或不属于当前用户",
+        ) from exc
+    return TemuFavoriteBatchResponse(updated=updated, favorite=payload.favorite)
 
 
 @router.put("/products/{product_id}/favorite", response_model=TemuFavoriteResponse)

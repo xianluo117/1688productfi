@@ -693,9 +693,24 @@ class TemuFavoriteUpdate(BaseModel):
     favorite: bool
 
 
+class TemuFavoriteBatchUpdate(BaseModel):
+    product_ids: list[int] = Field(min_length=1, max_length=100)
+    favorite: bool
+
+    @field_validator("product_ids")
+    @classmethod
+    def unique_product_ids(cls, value: list[int]) -> list[int]:
+        return list(dict.fromkeys(value))
+
+
 class TemuFavoriteResponse(BaseModel):
     product_id: int
     is_favorite: bool
+
+
+class TemuFavoriteBatchResponse(BaseModel):
+    updated: int
+    favorite: bool
 
 
 class TemuSnapshotResponse(BaseModel):

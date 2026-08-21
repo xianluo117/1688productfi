@@ -27,7 +27,11 @@ from app.models import (
 from app.schemas import TemuIngestBatchRequest, TemuIngestProduct
 from app.temu_image_download_services import enqueue_temu_image_scope
 from app.temu_image_search_client import cancel_remote_tasks
-from app.temu_favorite_services import build_favorites_workbook, set_temu_favorite
+from app.temu_favorite_services import (
+    build_favorites_workbook,
+    set_temu_favorite,
+    set_temu_favorites_batch,
+)
 from app.temu_image_search_services import (
     claim_temu_image_search,
     config_payload,
@@ -697,6 +701,45 @@ def test_temu_favorites_are_owner_scoped_and_export_top1():
 
         assert set_temu_favorite(db, owner.id, product.id, False) is False
         assert db.scalar(select(TemuProductFavorite).where(TemuProductFavorite.owner_id == owner.id)) is None
+
+
+def test_temu_batch_favorites_are_idempotent_and_owner_scoped():
+    with create_session() as db:
+        owner = create_user(db, "batch-favorite-owner")
+        other = create_user(db, "batch-favorite-other")
+        group = TemuProductGroup(owner_id=owner.id, name="批量收藏", normalized_name="批量收藏")
+        products = [
+            TemuProduct(
+                temu_product_id=f"batch-favorite-{index}",
+                title=f"批量收藏 {index}",
+                product_url=f"https://www.temu.com/batch-favorite-{index}",
+                daily_sales=index,
+                weekly_sales=index,
+                monthly_sales=index,
+                total_sales=index,
+                is_ad=False,
+            )
+            for index in range(1, 3)
+        ]
+        db.add_all([group, *products])
+        db.flush()
+        db.add_all([
+            TemuGroupMembership(owner_id=owner.id, product_id=product.id, group_id=group.id)
+            for product in products
+        ])
+        db.commit()
+
+        product_ids = [product.id for product in products]
+        assert set_temu_favorites_batch(db, owner.id, product_ids, True) == 2
+        assert set_temu_favorites_batch(db, owner.id, product_ids, True) == 2
+        assert db.query(TemuProductFavorite).count() == 2
+        assert set_temu_favorites_batch(db, owner.id, product_ids, False) == 2
+        assert db.query(TemuProductFavorite).count() == 0
+        try:
+            set_temu_favorites_batch(db, other.id, product_ids, True)
+            assert False, "other owner must not batch favorite inaccessible products"
+        except LookupError:
+            pass
 
 
 def test_temu_remove_membership_preserves_shared_product_and_hard_deletes_orphan():

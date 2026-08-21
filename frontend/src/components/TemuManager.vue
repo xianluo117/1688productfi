@@ -15,6 +15,7 @@ const selectedScope = ref("all");
 const selectedGroupId = ref(null);
 const favoriteCount = ref(0);
 const products = ref([]);
+const selectedProductIds = ref([]);
 const detail = ref(null);
 const detailLoading = ref(false);
 const detailError = ref("");
@@ -55,6 +56,11 @@ const scopeTitle = computed(() => {
 const totalPages = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize)),
 );
+const allPageSelected = computed(
+  () =>
+    products.value.length > 0 &&
+    products.value.every((product) => selectedProductIds.value.includes(product.id)),
+);
 
 async function loadGroups() {
   const params = new URLSearchParams();
@@ -70,7 +76,12 @@ async function loadGroups() {
   } else await loadProducts();
 }
 
+function clearSelection() {
+  selectedProductIds.value = [];
+}
+
 function selectScope(scope) {
+  clearSelection();
   selectedScope.value = scope;
   selectedGroupId.value = null;
   page.value = 1;
@@ -80,6 +91,7 @@ function selectScope(scope) {
 }
 
 function selectGroup(group) {
+  clearSelection();
   selectedScope.value = "group";
   selectedGroupId.value = group.id;
   sort.field = group.default_sort_field;
@@ -126,6 +138,7 @@ async function loadProducts() {
           : "/api/temu/products";
     const result = await api(`${endpoint}?${params}`);
     products.value = result.items;
+    clearSelection();
     total.value = result.total;
   } finally {
     loading.value = false;
@@ -174,6 +187,36 @@ async function toggleSort(field) {
     });
   }
   await loadProducts();
+}
+
+async function renameSelectedGroup() {
+  if (!selectedGroup.value) return;
+  const name = window.prompt("新的分组名称", selectedGroup.value.name)?.trim();
+  if (!name || name === selectedGroup.value.name) return;
+  await api(`/api/temu/groups/${selectedGroup.value.id}`, {
+    method: "PUT",
+    body: JSON.stringify({ name }),
+  });
+  await loadGroups();
+}
+
+function togglePageSelection() {
+  selectedProductIds.value = allPageSelected.value
+    ? []
+    : products.value.map((product) => product.id);
+}
+
+async function batchFavorite(favorite) {
+  if (!selectedProductIds.value.length) return;
+  const owner = isAdmin.value ? `?owner_id=${selectedOwnerId.value}` : "";
+  await api(`/api/temu/products/favorites/batch${owner}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      product_ids: selectedProductIds.value,
+      favorite,
+    }),
+  });
+  await loadGroups();
 }
 
 async function toggleFavorite(product) {
@@ -354,6 +397,9 @@ onMounted(loadGroups);
           <span>共 {{ total }} 个商品</span>
         </div>
         <div class="temu-row-actions">
+          <button v-if="selectedScope === 'group'" @click="renameSelectedGroup">
+            重命名
+          </button>
           <button
             v-if="selectedScope === 'group'"
             class="danger"
@@ -460,10 +506,28 @@ onMounted(loadGroups);
         </div>
       </form>
 
+      <div class="temu-row-actions temu-batch-actions">
+        <span>已选择 {{ selectedProductIds.length }} 个商品</span>
+        <button :disabled="!selectedProductIds.length" @click="batchFavorite(true)">
+          批量收藏
+        </button>
+        <button :disabled="!selectedProductIds.length" @click="batchFavorite(false)">
+          批量取消收藏
+        </button>
+      </div>
+
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
+              <th>
+                <input
+                  type="checkbox"
+                  :checked="allPageSelected"
+                  aria-label="全选当前页"
+                  @change="togglePageSelection"
+                />
+              </th>
               <th>主图</th>
               <th>平台同款</th>
               <th>以图找图结果</th>
@@ -495,6 +559,14 @@ onMounted(loadGroups);
           </thead>
           <tbody>
             <tr v-for="product in products" :key="product.id">
+              <td>
+                <input
+                  v-model="selectedProductIds"
+                  type="checkbox"
+                  :value="product.id"
+                  :aria-label="`选择商品 ${product.temu_product_id}`"
+                />
+              </td>
               <td>
                 <img
                   v-if="product.image_url"
@@ -600,7 +672,7 @@ onMounted(loadGroups);
                   {{ detailLoading ? "加载中" : "详情" }}
                 </button>
                 <button class="danger" @click="removeProduct(product)">
-                  {{ selectedScope === "group" ? "移出分组" : "移出全部分组" }}
+                  {{ selectedScope === "group" ? "从本组删除" : "删除产品" }}
                 </button>
               </td>
             </tr>
