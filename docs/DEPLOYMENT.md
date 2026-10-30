@@ -1,252 +1,177 @@
-# 1688 商品管理系统
+# 部署与管理员指南
 
-## 1688 图片同款识别
+本文面向安装和管理系统的人员。日常操作见[用户 README](../README.md)，源码构建、架构和接口说明见[开发者 README](../about-dev/README.md)。
 
-系统使用 pHash 与图片 Embedding 建立跨用户共享的 1688 同款簇。商品列表按簇去重，并按总件数、每日笔数、最近采集时间选择全局代表商品。
+## 1. 环境准备
 
-部署要求：
+安装 Docker Engine 和 Docker Compose 插件；Windows 可使用 Docker Desktop 的 Linux 容器模式。
 
-- 数据库使用 `pgvector/pgvector:pg16`，迁移会启用 `vector` 扩展。
-- `migrate` 服务先完成数据库迁移，随后后端与独立 Worker 才会启动。
-- 后端、`similarity-worker`、`temu-image-worker` 共用数据库和图片卷。
-- `temu-image-search-worker` 使用数据库持久化图搜任务，不依赖进程内后台任务。
-- `.env` 不需要填写 `AI_SECRET_KEY`。管理员面板保存的第三方 API Key 默认由 `SESSION_SECRET` 加密，因此必须保持 `SESSION_SECRET` 稳定。
-- 向量存储固定为 1536 维。实际图片模型可输出不超过 1536 维的向量，后端归一化后补零，允许后续切换模型维度而不重建列类型。
+在项目根目录执行以下命令检查 Compose：
 
-管理员在 1688 页面进入“AI 同款”后完成配置：
+```text
+docker compose version
+```
 
-1. 填写 OpenAI 兼容服务的自定义 Base URL，例如 `https://newapi.momoaisite.com/v1`。也可直接填写完整的 `/embeddings` 地址。
-2. 在管理员面板填写并保存第三方 API Key、模型名和实际输出维度，无需写入 `.env`。
-3. 默认请求体为 `model + input`，默认响应路径为 `data.0.embedding`；第三方接口不一致时再修改请求 JSON 模板与响应路径。
-4. 设置 TopK、pHash 自动距离、审核阈值、自动合并阈值和自动合并开关。
-5. 保存为当前模型后，存量缓存图片会渐进排队处理。
+本指南使用项目提供的预构建镜像。直接更新源码不会更新容器内程序；需要运行本地源码时，请参考开发者文档构建镜像。
 
-填写 Base URL 时，后端自动追加 `/embeddings`。请求模板支持双大括号占位符：`model`、`image_data_url`、`image_base64`、`image_url`、`product_id`。
+## 2. 配置环境
 
-模型、维度、接口或模板变化时会创建新版本。旧向量继续保留，新版本后台渐进重算，避免直接破坏在线索引。
+将 [`.env.example`](../.env.example) 复制为项目根目录的 [`.env`](../.env)，用文本编辑器填写配置。
 
-升级命令：
+| 配置 | 用途 |
+|---|---|
+| POSTGRES_DB / POSTGRES_USER | 数据库名称与账号，默认均为 product_manager |
+| POSTGRES_PASSWORD | 数据库密码，必须替换示例值 |
+| ADMIN_USERNAME | 首次初始化的管理员用户名，默认 admin |
+| ADMIN_PASSWORD | 首次初始化的管理员密码，至少 12 个字符 |
+| SESSION_SECRET | 会话及服务密钥加密使用的秘密值，建议至少 32 个随机字符，必须替换示例值并长期保持稳定 |
+| COOKIE_SECURE | HTTP 访问用 false；反向代理启用 HTTPS 后改为 true |
+| APP_BIND_ADDRESS | 默认 127.0.0.1，仅服务器本机可访问 |
+| APP_PORT | 对外入口端口，默认 1788 |
+| ALLOWED_ORIGINS | 允许的浏览器来源，多个来源以逗号分隔 |
+| BACKEND_IMAGE / FRONTEND_IMAGE | 后端、前端镜像，默认使用示例中的仓库与标签 |
+
+数据库密码会参与连接地址拼接，建议使用不含 URL 保留字符的随机密码。
+
+- 不配置全局采集令牌。个人令牌在用户管理中创建或重置。
+- AI 和图搜服务地址、API Key 在管理员控制台保存，不需要额外配置 AI_SECRET_KEY。
+- 不随意更换 SESSION_SECRET，否则现有登录会话和已保存服务密钥的解密会受影响。
+- 已存在的管理员账号应在用户管理中重置密码，不把修改初始化配置当作密码重置操作。
+
+### 访问方式
+
+- **本机使用**：保持默认配置，访问 http://127.0.0.1:1788。
+- **直接远程访问**：将 APP_BIND_ADDRESS 改为 0.0.0.0，开放相应端口，再访问服务器地址的 1788 端口。
+- **域名访问**：保持本机监听，由外层反向代理将域名请求转发到 http://127.0.0.1:1788，并配置 HTTPS。
+
+反向代理需保留原请求路径，至少确保页面、API 和 /images/ 图片路径均可访问。反向代理位于其他容器时，127.0.0.1 指向该容器自身，需改用实际可达的宿主机或网络地址。
+
+## 3. 启动
+
+在项目根目录执行：
 
 ```text
 docker compose pull
 docker compose up -d
-docker compose ps
+docker compose ps -a
 ```
 
-从普通 PostgreSQL 16 镜像切换至 pgvector PostgreSQL 16 时保留原 `postgres_data` 卷，禁止删除数据卷。
+首次启动会初始化数据库并执行迁移。迁移成功后启动后端和三个后台处理服务，再启动网页入口。一次性 migrate 服务成功退出属于正常状态。
 
-## 平台入口
+打开配置的地址，使用初始化管理员账号登录。默认镜像为：
 
-登录成功后首先进入平台选择首页，可进入 1688 或 Temu 产品系统。
+- 后端：qingmiaoai/1688productfitt:backend
+- 前端：qingmiaoai/1688productfitt:frontend
 
-Temu 数据规则：
+检查服务状态：
 
-- Temu 原生商品 ID 是全局唯一键，任一用户上传同 ID 都更新全局当前值。
-- 云启 `gdid` 仅是辅助字段，允许与 Temu 原生商品 ID 不同；云启 Shadow DOM 位于对应原生商品卡片内时视为可靠容器关联。
-- Temu 分组、成员关系、批次和历史快照按用户隔离。
-- 管理员可按用户切换 Temu 数据视角。
-- Temu 列表默认隐藏广告，筛选面板可开启显示。
-- 半托管且包含 `Local` 标签显示为“半托Y1”，其他半托管显示为“半托Y2”。
-- Temu 油猴脚本同时支持 CSV 导出和个人令牌上传，每次 See more 后等待 5 秒再上传可靠关联记录。
-
-升级会自动执行 Alembic 迁移并创建 Temu 独立数据表，升级前必须备份 PostgreSQL。
-
-## Temu 1688 以图找图
-
-管理员控制台提供独立“1688 以图找图”模块：
-
-1. 填写图搜服务根地址，例如 `https://search.example.com`。
-2. 填写 `SEARCH_API_KEY`。密钥由 `SESSION_SECRET` 加密保存，前端只显示脱敏值。
-3. 填写缓存图片公开域名，例如 `https://products.example.com`。只允许 HTTPS，且公网必须能直接访问 `https://products.example.com/images/<缓存文件名>`。
-4. 点击“检测服务”，确认健康状态为 `ok` 且 1688 Cookie 可用。
-5. 开启“图片就绪后自动图搜”并保存配置。
-6. 按图搜服务容量设置并发数，允许 1 至 20，默认 4。
-7. 需要处理存量商品时，选择用户和 Temu 分组后执行“重新执行以图找图”。
-
-运行规则：
-
-- Temu 图片下载成功并标记为就绪后，自动创建持久化图搜任务。
-- 管理员填写完整图搜 API 根地址，包括协议、域名和实际端口；系统不写死端口。
-- 图搜调用采用两阶段流程：创建并轮询 `upload-tasks`，上传成功后再创建并轮询 `product-tasks`。旧 `search-tasks` 接口不再调用。
-- 已配置缓存图片公开域名且缓存文件存在时，图搜 API 优先接收公网 HTTPS 缓存地址；否则回退 Temu 规范化原图 URL。
-- 公网域名必须把 `/images/` 反向代理至本系统。Compose 前端已将 `/images/` 代理到后端静态图片服务，外层反向代理需保留该路径。
-- Worker 默认每 2 秒轮询，完整两阶段流程默认最多等待 180 秒。
-- 队列支持运行、暂停、停止三态。暂停会立即中止本地轮询并保留上传任务 ID、商品任务 ID和当前阶段，继续后从断点恢复。
-- 停止会优先调用远程 DELETE 取消商品任务，再取消上传任务；无论远程取消是否成功，都会记录诊断信息、清除本地断点，继续后从上传阶段重新创建。
-- Worker 动态读取管理员设置的并发数，新配置不需要重启容器。降低并发数不会强制取消已运行任务，只会停止补充超额任务。
-- 1688 结果图片会统一转换为 HTTPS；浏览器以无 Referrer 方式加载，加载失败时显示可点击的 Top 排名占位，不再显示破图图标。
-- `429`、网络错误、HTTP `5xx` 和可重试远程错误使用指数退避，最多尝试 5 次。
-- 每次成功结果保存 1688 官方图搜页 URL、结果总数和排序最前的 3 个商品。
-- Temu 列表常态展示 Top1 图片；商品详情可查看更多结果并打开 1688 官方图搜页。
-- 外部图搜结果与人工确认的“显示货源”分开保存，不自动认定为正式货源。
-- 失败任务支持单条重试和按用户批量重试。
-
-## 组成
-
-- [`1688-listing-date-collector.user.js`](../1688-listing-date-collector.user.js)：1688 Tampermonkey 采集端。
-- [`temu-product-collector.user.js`](../temu-product-collector.user.js)：Temu 与云启数据 Tampermonkey 采集端。
-- [`backend`](../backend)：FastAPI、PostgreSQL、Alembic、用户认证、采集授权和图片缓存。
-- [`frontend`](../frontend)：Vue 3 管理后台。
-- [`docker-compose.yml`](../docker-compose.yml)：Docker Compose 部署入口。
-
-## 权限与数据规则
-
-- 管理员创建、启用或禁用用户，并可重置密码和个人采集令牌。
-- 普通用户只能查看和管理自己的分组、分组成员、采集批次和历史快照。
-- 管理员可选择任意用户，查看该用户的分组、商品和历史。
-- 商品基础记录及列表中的最新指标全局共享：任意用户的新上传会更新商品当前值。
-- 商品详情中的分组和历史按当前查看用户过滤。
-- 分组名称只要求在同一用户内唯一；不同用户可使用相同分组名称。
-- 个人采集令牌只保存 SHA-256 哈希；明文仅在创建或重置时显示一次。
-- 旧版全局 `INGEST_API_TOKEN` 升级后立即失效。
-
-## 商品筛选
-
-商品列表支持组合筛选：
-
-- 上架日期起止。
-- 上架天数最小值和最大值。
-- 总笔数最小值和最大值。
-- 总件数最小值和最大值。
-- 每日笔数最小值和最大值。
-- 最后采集时间起止。
-
-筛选条件与分页、排序同时生效。
-
-## 部署
-
-### 1. 环境要求
-
-安装 Docker Engine 和 Docker Compose 插件。
-
-```bash
-docker compose version
+```text
+docker compose logs --tail 100 migrate backend
+docker compose logs --tail 100 similarity-worker temu-image-worker temu-image-search-worker
 ```
 
-### 2. 备份旧数据
+浏览器访问 http://127.0.0.1:1788/api/health 可检查 API 是否响应；使用远程地址时相应替换域名和端口。
 
-升级多用户版本前必须备份数据库和图片。
+## 4. 创建用户和配置采集
 
-```bash
-docker compose exec -T db pg_dump -U product_manager product_manager > product_manager.sql
+1. 进入管理员控制台的“用户管理”。
+2. 创建用户，立即保存本次显示的个人采集令牌。
+3. 将系统地址、账号、初始密码和令牌交给用户。
+4. 按[用户 README](../README.md)安装脚本，并配置后台地址和分组。
+
+令牌遗失后只能重置；重置后需同步更新脚本。禁用账号后，该用户不能继续登录或采集。
+
+从旧单用户版本升级时，已有分组、批次和历史归属原管理员；旧全局采集令牌不再有效，需要改用个人令牌。
+
+## 5. 图片与外部服务
+
+### Temu 图片下载
+
+进入“Temu 图片下载”，选择用户和分组，提交补齐任务。未选择分组时处理该用户全部 Temu 商品。
+
+在任务列表查看进度和错误信息；失败任务可重试。后台处理服务需要能够访问商品图片地址。
+
+### 相似度检索
+
+进入“相似度检索”：
+
+1. 填写兼容图片 Embedding 的服务地址、API Key、模型名和输出维度。
+2. 服务地址可以是 Base URL，也可以是完整的 /embeddings 地址。
+3. 按服务要求配置请求模板和响应路径；默认响应路径为 data.0.embedding。
+4. 设置检索数量、pHash 距离、审核和自动合并阈值。
+5. 保存当前模型，按需选择处理范围，查看任务与审核结果。
+
+模型输出维度不能超过 1536。切换模型配置会建立新版本，存量图片需要后台重新处理。
+
+### 1688 以图找图
+
+进入“1688 以图找图”：
+
+1. 填写图搜服务完整根地址和对应 API Key，包含实际使用的协议和端口。
+2. 填写缓存图片公开域名，必须为 HTTPS，并能从公网访问 /images/ 下的图片。
+3. 点击“检测服务”，确认服务健康且 1688 Cookie 可用。
+4. 开启“图片就绪后自动图搜”，保存配置。
+5. 根据外部服务容量设置并发数，范围 1～20，默认 4。
+6. 对已有商品，选择用户和 Temu 分组，执行“重新执行以图找图”。
+
+队列支持运行、暂停和停止。暂停后可继续当前进度；停止会尝试取消远程任务，继续时重新开始上传。并发配置保存后无需重启服务。
+
+图搜成功后，商品详情最多展示前三个结果及官方图搜链接。失败任务可单条或按用户批量重试。图搜候选不会自动成为已确认货源。
+
+## 6. 升级与备份
+
+### 备份内容
+
+升级前同时备份：
+
+- PostgreSQL 数据。
+- 图片数据卷 image_data。
+- 当前环境配置，尤其是 SESSION_SECRET。
+
+Compose 会为数据卷名称加项目名前缀，实际名称以部署环境为准。恢复时应保持数据库、图片与配置来自对应备份。
+
+以下命令使用默认数据库名称和账号，在数据库容器内生成备份并复制到当前目录，避免终端重定向改变备份编码：
+
+```text
+docker compose exec -T db pg_dump -U product_manager -d product_manager -Fc -f /tmp/product_manager.dump
+docker compose cp db:/tmp/product_manager.dump ./product_manager.dump
 ```
 
-图片位于 Docker 卷 `image_data`。
+自定义了数据库名或账号时，替换相应参数。图片卷使用部署环境的卷备份工具或平台快照单独备份。
 
-### 3. 配置环境
+### 更新镜像
 
-```bash
-cp .env.example .env
-```
-
-至少替换：
-
-- `POSTGRES_PASSWORD`
-- `ADMIN_PASSWORD`
-- `SESSION_SECRET`
-
-个人采集令牌不写入 [`.env.example`](../.env.example)，由管理员登录后创建或重置。
-
-初次部署且未启用 HTTPS 时使用 `COOKIE_SECURE=false`。启用 HTTPS 后改为 `true`。
-
-### 4. 启动或升级
-
-```bash
+```text
 docker compose pull
 docker compose up -d
+docker compose ps -a
+docker compose logs --tail 100 migrate backend
 ```
 
-Docker Compose 先运行一次性 `migrate` 服务执行 Alembic 升级，成功后才启动后端、图片下载、图片相似度和 1688 图搜 Worker。首次升级多用户版本时：
+更新会自动执行数据库迁移。不要删除数据卷；也不要使用带删除数据卷选项的停止命令进行普通升级。
 
-1. 现有管理员账号标记为管理员角色。
-2. 现有分组、成员关系、批次和快照归属该管理员。
-3. 旧全局采集令牌不迁移，立即失效。
+从普通 PostgreSQL 16 切换到 pgvector PostgreSQL 16 时，保留已有数据库卷并先完成备份。
 
-默认镜像：
+### 恢复数据库
 
-- `qingmiaoai/1688productfitt:backend`
-- `qingmiaoai/1688productfitt:frontend`
+先准备同名账号和一个**空的目标数据库**，暂停后端和后台处理服务的写入，再执行：
 
-默认监听 `127.0.0.1:1788`。
-
-```bash
-docker compose ps
-docker compose logs -f backend frontend db similarity-worker temu-image-worker temu-image-search-worker
-curl -fsS http://127.0.0.1:1788/api/health
+```text
+docker compose cp ./product_manager.dump db:/tmp/product_manager.dump
+docker compose exec -T db pg_restore -U product_manager -d product_manager --no-owner --exit-on-error /tmp/product_manager.dump
 ```
 
-## 用户管理
+恢复对应图片卷和环境配置后，再启动其余服务。上述命令不负责清空已有数据库，不应直接用于已有业务数据的目标库。
 
-1. 访问 `http://服务器地址:1788`。
-2. 使用 [`.env.example`](../.env.example) 对应的管理员账号登录。
-3. 打开“用户”页面。
-4. 创建用户并立即复制本次显示的个人采集令牌。
-5. 将账号、初始密码和个人采集令牌分别交付用户。
-6. 用户离职或停止使用时禁用账号；禁用后网站登录和采集令牌同时失效。
-7. 重置令牌后旧令牌立即失效。
+## 7. 常见问题
 
-## 配置油猴
-
-分别安装或完整覆盖最新版：
-
-- [`1688-listing-date-collector.user.js`](../1688-listing-date-collector.user.js)
-- [`temu-product-collector.user.js`](../temu-product-collector.user.js)
-
-Temu 脚本需要 Tampermonkey 授权 `GM_xmlhttpRequest` 和目标后台域名连接权限。安装或升级脚本时应确认授权提示；请求由 Tampermonkey 发出，不依赖 Temu 页面 CORS。
-
-在采集面板填写：
-
-- 后台地址：例如 `https://products.example.com`，不要以 `/` 结尾。
-- 个人采集令牌：管理员创建用户或重置令牌时提供的 `zoo_...` 值。
-- 已有分组或输入分组名称。分组不存在时在当前令牌用户下自动创建。
-
-不要继续使用旧 [`.env`](../.env) 中的 `INGEST_API_TOKEN`。
-
-## 反向代理
-
-```nginx
-location / {
-    proxy_pass http://127.0.0.1:1788;
-    proxy_set_header Host $host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
-## 本次发布
-
-- Git 提交：`f15cfc9 feat: add multi-user data isolation and filters`
-- 后端镜像：`qingmiaoai/1688productfitt:backend`
-- 后端摘要：`sha256:f67d8a2c44a066e282a91bc0899910ec00e7ccddea699cdf603d2e7f26587cae`
-- 前端镜像：`qingmiaoai/1688productfitt:frontend`
-- 前端摘要：`sha256:c2a28777e9c10090898c593414df5befae8f1a509bab4b00192d5e46ebbdaee3`
-- 后端镜像构建阶段通过 9 项测试。
-- 前端镜像构建阶段通过 Vite 构建与 Vitest 检查。
-
-## 恢复
-
-恢复到空数据库：
-
-```bash
-docker compose exec -T db psql -U product_manager product_manager < product_manager.sql
-```
-
-## 验收清单
-
-1. 管理员可以创建普通用户，并且明文采集令牌只在创建响应中显示。
-2. 普通用户只能看到自己的分组；不同用户可创建同名分组。
-3. 禁用用户后，该用户网站会话和个人采集令牌均不可继续使用。
-4. 油猴使用个人令牌加载、创建分组并上传，数据归属令牌用户。
-5. 用户无法通过修改分组 ID 上传到其他用户的分组。
-6. 管理员可以切换用户查看分组、商品和该用户历史。
-7. 普通用户商品详情不返回其他用户的分组和历史。
-8. 任意用户上传同一商品后，全局商品当前指标更新。
-9. 上架日期/天数、总笔数、总件数、每日笔数和采集时间筛选可组合使用。
-10. 升级前已有数据全部出现在管理员用户视角中。
-11. Temu 脚本可从 `www.temu.com` 通过 Tampermonkey 跨域请求加载分组并上传批次。
-12. 云启 `gdid` 与 Temu 原生商品 ID 不同时，同一原生商品卡片内的云启 Shadow DOM 仍可按可靠容器关联上传，并以原生 ID 更新商品。
-13. Temu 列表默认不显示广告；开启“显示广告产品”后才显示广告记录。
-14. Temu 图片就绪且自动图搜开启后，数据库出现等待或执行中的图搜任务。
-15. 图搜成功后 Temu 列表展示 Top1 图片，详情展示最多 3 条结果和 1688 官方图搜页链接。
-16. 管理员可按用户和分组补跑图搜，并可单条或批量重试失败任务。
+| 问题 | 检查项 |
+|---|---|
+| 服务器本机能打开，其他电脑不能打开 | 默认只监听本机；调整监听地址或配置反向代理，并检查端口开放情况 |
+| HTTP 下登录后仍显示未登录 | 未启用 HTTPS 时，COOKIE_SECURE 应为 false |
+| 修改初始化管理员密码后不能用新密码登录 | 已有账号不通过初始化配置重置，使用用户管理重置密码 |
+| 页面未启动 | 查看 migrate 和 backend 日志，确认数据库和迁移成功 |
+| 新源码功能没有出现 | Compose 默认运行预构建镜像，需要发布对应镜像或自行构建 |
+| 图片或图搜任务未执行 | 查看对应后台服务、管理员配置、队列状态和任务错误 |
+| 图搜服务无法访问图片 | 检查公开 HTTPS 域名和 /images/ 路径，不使用仅本机可访问的地址 |
+| 升级后脚本上传失败 | 更新脚本并使用个人采集令牌，不再使用旧全局令牌 |

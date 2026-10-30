@@ -29,6 +29,8 @@ from .auth import (
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db
 from .image_cache import cache_product_image
+from .owned_products.database import dispose_engine as dispose_owned_products_engine
+from .owned_products.router import router as owned_products_router
 from .models import (
     AdminUser,
     CrossPlatformProductRelation,
@@ -96,7 +98,10 @@ async def lifespan(_: FastAPI):
             if attempt == 29:
                 raise
             await asyncio.sleep(2)
-    yield
+    try:
+        yield
+    finally:
+        await dispose_owned_products_engine()
 
 
 app = FastAPI(title="Product Manager", version="3.0.0", lifespan=lifespan)
@@ -104,7 +109,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 app.mount("/images", StaticFiles(directory=settings.image_storage_path, check_dir=False), name="images")
@@ -112,6 +117,7 @@ app.include_router(temu_router)
 app.include_router(temu_image_download_router)
 app.include_router(temu_image_search_router)
 app.include_router(similarity_router)
+app.include_router(owned_products_router)
 
 
 def current_user_response(user: AdminUser) -> CurrentUserResponse:

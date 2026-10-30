@@ -1,0 +1,18 @@
+from collections.abc import AsyncIterator
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from ..config import get_settings
+
+
+engine = create_async_engine(get_settings().database_url)
+SessionLocal = async_sessionmaker(engine, autoflush=False, expire_on_commit=False)
+
+
+async def get_db() -> AsyncIterator[AsyncSession]:
+    async with SessionLocal() as session:
+        yield session
+
+
+async def dispose_engine() -> None:
+    await engine.dispose()
